@@ -129,6 +129,7 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - `artifact/fixtures/nestjs-smoke/`: Committed NestJS sample project used by the smoke harness.
 - `artifact/run_retrieval_eval.py`: Benchmark runner that compares `baseline` and `hybrid` retrieval modes.
 - `artifact/fixtures/retrieval-eval-sample/`: Sample repository for retrieval benchmarking across backend and frontend cases.
+- `ai_code_agent/validation.py`: Single entrypoint that runs compile checks, unit tests, and retrieval evaluation in sequence.
 
 Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner behavior. The benchmark reports precision@k, recall@k, reciprocal rank, and NDCG@k.
 
@@ -142,3 +143,4 @@ Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner beha
 6. Run the CLI without API keys to use fallback mode for planning and smoke-test execution only.
 7. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.
 8. Run `python artifact/run_retrieval_eval.py` to compare baseline and hybrid retrieval quality on the committed fixture.
+9. Run `python -m ai_code_agent.validation` or `poetry run ai-code-agent-validate` to execute the combined developer validation suite.

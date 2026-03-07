@@ -20,6 +20,7 @@ python-dotenv = "^1.0.1"
 
 [tool.poetry.scripts]
 ai-code-agent = "ai_code_agent.main:cli"
+ai-code-agent-validate = "ai_code_agent.validation:main"
 
 [build-system]
 requires = ["poetry-core"]
