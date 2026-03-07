@@ -1,0 +1,33 @@
+[
+  {
+    "name": "payments_webhook_flow",
+    "issue": "update payments webhook event handling",
+    "expected_files": [
+      "backend/payments/webhook.py",
+      "backend/payments/service.py",
+      "backend/common/events.py"
+    ],
+    "top_k": 5
+  },
+  {
+    "name": "orders_service_query",
+    "issue": "fix orders repository query in service",
+    "expected_files": [
+      "backend/orders/service.py",
+      "backend/orders/repository.py",
+      "backend/orders/router.py"
+    ],
+    "top_k": 5
+  },
+  {
+    "name": "dashboard_metrics_chain",
+    "issue": "revamp dashboard metrics page",
+    "expected_files": [
+      "frontend/app/dashboard/page.tsx",
+      "frontend/components/metrics-card.tsx",
+      "frontend/lib/analytics.ts",
+      "frontend/lib/api-client.ts"
+    ],
+    "top_k": 5
+  }
+]

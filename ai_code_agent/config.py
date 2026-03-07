@@ -42,6 +42,7 @@ class AgentConfig:
     workspace_dir: str = field(default_factory=lambda: os.getenv("AGENT_WORKSPACE_DIR", "."))
     auto_commit: bool = field(default_factory=lambda: os.getenv("AUTO_COMMIT", "false").lower() == "true")
     auto_push: bool = field(default_factory=lambda: os.getenv("AUTO_PUSH", "false").lower() == "true")
+    retrieval_mode: str = field(default_factory=lambda: os.getenv("RETRIEVAL_MODE", "hybrid"))
     
     # Internal orchestrator limits
     max_retries: int = int(os.getenv("MAX_RETRIES", "3"))

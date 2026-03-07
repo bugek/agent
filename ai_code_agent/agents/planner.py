@@ -24,11 +24,12 @@ class PlannerAgent(BaseAgent):
         search = CodeSearch(state["workspace_dir"])
         keywords = self._extract_keywords(issue)
         workspace_profile = detect_workspace_profile(state["workspace_dir"])
-        scored_files = self._score_candidate_files(search, keywords)
-        scored_files = self._merge_scored_files(scored_files, self._score_nextjs_candidates(state["workspace_dir"], workspace_profile, keywords))
-        scored_files = self._merge_scored_files(scored_files, self._score_nestjs_candidates(workspace_profile, keywords))
+        retrieval_mode = self._normalized_retrieval_mode()
+        scored_files = self._rank_candidate_files(search, state["workspace_dir"], workspace_profile, keywords, retrieval_mode)
+        graph_seed_files = self._graph_seed_files(search, scored_files, keywords) if retrieval_mode == "hybrid" else []
 
         candidate_files = [file_path for file_path, _ in scored_files[:10]]
+        candidate_files = self._expand_related_files(search, candidate_files, keywords, retrieval_mode)
         candidate_files = self._prioritize_profile_files(candidate_files, workspace_profile)
 
         if not candidate_files:
@@ -52,11 +53,44 @@ class PlannerAgent(BaseAgent):
             "planning_context": {
                 "keywords": keywords[:10],
                 "workspace_profile": workspace_profile,
+                "retrieval_strategy": retrieval_mode,
+                "candidate_explanations_schema_version": 2,
+                "graph_seed_files": graph_seed_files,
                 "candidate_scores": [
                     {"file_path": file_path, "score": score} for file_path, score in scored_files[:10]
                 ],
+                "candidate_explanations": [
+                    search.explain_candidate(file_path, keywords, graph_seed_files)
+                    for file_path, _ in scored_files[:10]
+                ],
             },
         }
+
+    def _rank_candidate_files(
+        self,
+        search: CodeSearch,
+        workspace_dir: str,
+        workspace_profile: dict,
+        keywords: list[str],
+        retrieval_mode: str,
+    ) -> list[tuple[str, int]]:
+        scored_files = self._score_candidate_files(search, keywords)
+        if retrieval_mode != "baseline":
+            scored_files = self._scale_scores(scored_files, 0.6)
+            scored_files = self._merge_scored_files(scored_files, search.hybrid_search(keywords, workspace_profile))
+        scored_files = self._merge_scored_files(scored_files, self._score_nextjs_candidates(workspace_dir, workspace_profile, keywords))
+        scored_files = self._merge_scored_files(scored_files, self._score_nestjs_candidates(workspace_profile, keywords))
+        if retrieval_mode == "hybrid":
+            seed_files = self._graph_seed_files(search, scored_files, keywords)
+            scored_files = self._merge_scored_files(scored_files, search.graph_related_files(seed_files, keywords))
+            scored_files = self._rerank_hybrid_scores(search, scored_files, keywords)
+        return scored_files
+
+    def _normalized_retrieval_mode(self) -> str:
+        retrieval_mode = (self.config.retrieval_mode or "hybrid").strip().lower()
+        if retrieval_mode in {"baseline", "hybrid"}:
+            return retrieval_mode
+        return "hybrid"
 
     def _extract_keywords(self, issue: str) -> list[str]:
         words = re.findall(r"[A-Za-z_][A-Za-z0-9_\-]+", issue.lower())
@@ -72,8 +106,12 @@ class PlannerAgent(BaseAgent):
             "into",
             "agent",
             "code",
+            "update",
+            "fix",
+            "revamp",
+            "current",
         }
-        return [word for word in words if len(word) > 2 and word not in stop_words]
+        return [self._normalize_keyword(word) for word in words if len(word) > 2 and self._normalize_keyword(word) not in stop_words]
 
     def _fallback_plan(self, issue: str, candidate_files: list[str]) -> str:
         steps = [
@@ -122,6 +160,65 @@ class PlannerAgent(BaseAgent):
                 seen.add(file_path)
 
         return prioritized[:10]
+
+    def _expand_related_files(self, search: CodeSearch, candidate_files: list[str], keywords: list[str], retrieval_mode: str) -> list[str]:
+        if not candidate_files:
+            return []
+
+        related_files = [file_path for file_path, _ in search.related_files(candidate_files[:5])[:5]]
+        graph_files: list[str] = []
+        if retrieval_mode == "hybrid":
+            graph_files = [
+                file_path
+                for file_path, _ in search.graph_related_files(
+                    self._graph_seed_files(search, [(file_path, 0) for file_path in candidate_files[:5]], keywords),
+                    keywords,
+                )[:5]
+            ]
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for file_path in [*candidate_files, *related_files, *graph_files]:
+            if file_path not in seen:
+                expanded.append(file_path)
+                seen.add(file_path)
+        return expanded[:10]
+
+    def _graph_seed_files(self, search: CodeSearch, scored_files: list[tuple[str, int]], keywords: list[str]) -> list[str]:
+        indexed_map = {indexed_file.path: indexed_file for indexed_file in search.build_index()}
+        keyword_set = set(keywords)
+        preferred_kinds = {
+            "code",
+            "nest-module",
+            "nest-controller",
+            "nest-service",
+            "nest-dto",
+            "next-route",
+            "next-layout",
+            "next-component",
+            "api-route",
+        }
+
+        highly_relevant: list[str] = []
+        prioritized: list[str] = []
+        fallback: list[str] = []
+        for file_path, _ in scored_files[:10]:
+            indexed_file = indexed_map.get(file_path)
+            if indexed_file is None:
+                continue
+            direct_relevance = bool(keyword_set.intersection(indexed_file.path_tokens)) or bool(keyword_set.intersection(indexed_file.symbols))
+            if indexed_file.kind in preferred_kinds and direct_relevance:
+                highly_relevant.append(file_path)
+            elif indexed_file.kind in preferred_kinds:
+                prioritized.append(file_path)
+            else:
+                fallback.append(file_path)
+
+        selected = highly_relevant[:5]
+        if len(selected) < 5:
+            selected.extend(file_path for file_path in prioritized if file_path not in selected)
+        if len(selected) < 3:
+            selected.extend(file_path for file_path in fallback if file_path not in selected)
+        return selected[:5]
 
     def _normalize_plan(self, plan: object) -> str:
         if isinstance(plan, str):
@@ -189,6 +286,47 @@ class PlannerAgent(BaseAgent):
             if keyword in normalized:
                 score += 4
         return score
+
+    def _scale_scores(self, scores: list[tuple[str, int]], factor: float) -> list[tuple[str, int]]:
+        scaled: list[tuple[str, int]] = []
+        for file_path, score in scores:
+            scaled_score = max(1, int(round(score * factor)))
+            scaled.append((file_path, scaled_score))
+        return scaled
+
+    def _rerank_hybrid_scores(self, search: CodeSearch, scored_files: list[tuple[str, int]], keywords: list[str]) -> list[tuple[str, int]]:
+        indexed_map = {indexed_file.path: indexed_file for indexed_file in search.build_index()}
+        keyword_set = set(keywords)
+        adjusted_scores: list[tuple[str, int]] = []
+
+        for file_path, score in scored_files:
+            indexed_file = indexed_map.get(file_path)
+            if indexed_file is None:
+                adjusted_scores.append((file_path, score))
+                continue
+
+            direct_path_overlap = len(keyword_set.intersection(indexed_file.path_tokens))
+            direct_symbol_overlap = len(keyword_set.intersection(indexed_file.symbols))
+            adjusted_score = score + (direct_path_overlap * 4) + (direct_symbol_overlap * 5)
+
+            if direct_path_overlap == 0 and direct_symbol_overlap == 0:
+                adjusted_score -= 18
+            if indexed_file.kind == "entrypoint" and direct_path_overlap == 0:
+                adjusted_score -= 12
+            if indexed_file.kind == "config":
+                adjusted_score -= 10
+
+            adjusted_scores.append((file_path, adjusted_score))
+
+        return sorted(adjusted_scores, key=lambda item: (-item[1], item[0]))
+
+    def _normalize_keyword(self, word: str) -> str:
+        normalized = word.strip().lower()
+        if normalized.endswith("ies") and len(normalized) > 4:
+            return normalized[:-3] + "y"
+        if normalized.endswith("s") and len(normalized) > 3 and not normalized.endswith("ss"):
+            return normalized[:-1]
+        return normalized
 
     def _score_nestjs_candidates(self, workspace_profile: dict, keywords: list[str]) -> list[tuple[str, int]]:
         nestjs_profile = workspace_profile.get("nestjs")
