@@ -39,7 +39,7 @@ class ReviewerAgent(BaseAgent):
             "analysis_only": analysis_only,
         }
         llm_review = self.llm.generate_json(REVIEWER_SYSTEM_PROMPT, json.dumps(review_payload, indent=2))
-        comments.extend(llm_review.get("review_comments", []))
+        comments.extend(self._normalize_comments(llm_review.get("review_comments", [])))
 
         review_approved = state.get("test_passed", False) and (analysis_only or bool(patches))
         if not analysis_only and "review_approved" in llm_review:
@@ -61,3 +61,10 @@ class ReviewerAgent(BaseAgent):
                 "exit_code": int(match.group(2)),
             })
         return signals
+
+    def _normalize_comments(self, raw_comments: object) -> list[str]:
+        if isinstance(raw_comments, str):
+            return [raw_comments]
+        if isinstance(raw_comments, list):
+            return [comment for comment in raw_comments if isinstance(comment, str) and comment.strip()]
+        return []
