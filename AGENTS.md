@@ -10,6 +10,78 @@ This project is an autonomous software engineering agent system. It is designed 
 
 We use a Multi-Agent architecture orchestrated via a State Machine. When `langgraph` is installed the project uses it directly; otherwise it falls back to a local in-process executor so the CLI can still run smoke checks.
 
+### End-to-End Flow
+
+1. The CLI or webhook receives an issue description plus a repository path.
+2. The orchestrator creates an `AgentState` payload and runs the planner, coder, tester, reviewer, and PR stages.
+3. The planner profiles the workspace, retrieves relevant files, and records planning metadata in `planning_context`.
+4. The coder applies deterministic framework-aware scaffolding when possible, then falls back to LLM-guided edits.
+5. The tester runs repository-appropriate validation, using Docker when available or local execution as fallback.
+6. The reviewer combines changed files, validation signals, and generated summaries to decide whether the run is acceptable.
+7. If approved, the workflow can proceed to git operations and PR creation.
+
+```mermaid
+flowchart LR
+	A[CLI or Webhook] --> B[Orchestrator]
+	B --> C[Planner]
+	C --> D[Coder]
+	D --> E[Tester]
+	E --> F[Reviewer]
+	F --> G{Approved?}
+	G -- No --> D
+	G -- Yes --> H[Git Ops / PR]
+
+	C -.-> C1[workspace_profile]
+	C -.-> C2[planning_context]
+	D -.-> D1[patches]
+	E -.-> E1[test_results]
+	F -.-> F1[review_comments]
+```
+
+### Retrieval Architecture
+
+The planner no longer relies only on raw text grep. Retrieval is now a hybrid pipeline built around `ai_code_agent/tools/code_search.py`.
+
+- `build_index()` classifies files and extracts symbols, imports, import paths, references, and path tokens.
+- `hybrid_search()` adds structured relevance scoring on top of simple keyword matching.
+- `build_import_graph()` links files through resolved Python and JS/TS imports.
+- `build_symbol_graph()` links files through symbol definition and usage relationships.
+- `graph_related_files()` expands candidate sets from graph neighbors so the planner can pull in connected implementation files.
+- `explain_candidate()` emits both human-readable `reasons` and machine-readable `explanation_edges` so retrieval decisions are inspectable.
+
+The planner stores retrieval output in `planning_context`, including:
+
+- `retrieval_strategy`
+- `graph_seed_files`
+- `candidate_scores`
+- `candidate_explanations`
+- `candidate_explanations_schema_version`
+
+```mermaid
+flowchart TD
+	A[Issue description] --> B[Keyword extraction]
+	B --> C[Raw text and symbol search]
+	B --> D[Hybrid index search]
+	D --> D1[build_index]
+	D1 --> D2[Symbols / Imports / References / Path tokens]
+	D --> E[Import graph]
+	D --> F[Symbol graph]
+	C --> G[Initial scored files]
+	D --> G
+	E --> H[Graph expansion]
+	F --> H
+	G --> I[Seed file selection]
+	I --> H
+	H --> J[Hybrid reranking]
+	J --> K[Top candidate files]
+	K --> L[explain_candidate]
+	L --> M[planning_context.candidate_scores]
+	L --> N[planning_context.candidate_explanations]
+	L --> O[planning_context.graph_seed_files]
+	N --> P[reasons]
+	N --> Q[explanation_edges]
+```
+
 ### Code Structure
 
 - `/ai_code_agent/orchestrator.py`: The heart of the system. Defines the `AgentState` and the LangGraph flow connecting all agents.
@@ -23,6 +95,7 @@ We use a Multi-Agent architecture orchestrated via a State Machine. When `langgr
 ## Agent Workflow Loop
 
 1. **Planner**: Decides *what* to do based on the issue and code context.
+   Planner output also carries retrieval evidence in `planning_context` so downstream tooling can inspect why candidate files were selected.
 2. **Coder**: Edits files based on the plan.
 3. **Tester**: Runs smoke checks in a sandbox, falling back to local execution when Docker is unavailable.
 4. **Reviewer**: Evaluates diffs and test results.
@@ -50,6 +123,15 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
 - The coder can deterministically scaffold NestJS modules, controllers, services, DTOs, and root module registration for common backend feature requests.
 
+## Evaluation Artifacts
+
+- `artifact/run_nestjs_smoke.py`: End-to-end NestJS smoke harness used to validate framework-aware generation and reviewer approval.
+- `artifact/fixtures/nestjs-smoke/`: Committed NestJS sample project used by the smoke harness.
+- `artifact/run_retrieval_eval.py`: Benchmark runner that compares `baseline` and `hybrid` retrieval modes.
+- `artifact/fixtures/retrieval-eval-sample/`: Sample repository for retrieval benchmarking across backend and frontend cases.
+
+Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner behavior. The benchmark reports precision@k, recall@k, reciprocal rank, and NDCG@k.
+
 ## Getting Started
 
 1. Copy `.env.example` to `.env` and fill in credentials.
@@ -59,3 +141,4 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 5. For repository readiness analysis, use a descriptive issue such as `poetry run ai-code-agent run --issue "analyze current repository and summarize readiness" --repo <path>`.
 6. Run the CLI without API keys to use fallback mode for planning and smoke-test execution only.
 7. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.
+8. Run `python artifact/run_retrieval_eval.py` to compare baseline and hybrid retrieval quality on the committed fixture.
