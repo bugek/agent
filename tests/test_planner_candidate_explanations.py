@@ -56,6 +56,84 @@ class PlannerCandidateExplanationsTest(unittest.TestCase):
         self.assertTrue(webhook_explanation["reasons"])
         self.assertTrue(webhook_explanation["explanation_edges"])
 
+        webhook_edge_signatures = {
+            (
+                edge["edge_type"],
+                edge.get("source_file"),
+                edge["target_file"],
+                edge["direction"],
+                edge["depth"],
+                edge.get("source_keyword"),
+            )
+            for edge in webhook_explanation["explanation_edges"]
+        }
+        self.assertIn(
+            (
+                "path_token_match",
+                None,
+                "backend/payments/webhook.py",
+                "keyword_to_file",
+                0,
+                "payment",
+            ),
+            webhook_edge_signatures,
+        )
+        self.assertIn(
+            (
+                "path_token_match",
+                None,
+                "backend/payments/webhook.py",
+                "keyword_to_file",
+                0,
+                "webhook",
+            ),
+            webhook_edge_signatures,
+        )
+        self.assertIn(
+            (
+                "imports_seed",
+                "backend/payments/webhook.py",
+                "backend/common/events.py",
+                "outgoing_import",
+                1,
+                None,
+            ),
+            webhook_edge_signatures,
+        )
+        self.assertIn(
+            (
+                "imports_seed",
+                "backend/payments/webhook.py",
+                "backend/payments/service.py",
+                "outgoing_import",
+                1,
+                None,
+            ),
+            webhook_edge_signatures,
+        )
+        self.assertIn(
+            (
+                "defines_symbol_used_by_seed",
+                "backend/payments/webhook.py",
+                "backend/common/events.py",
+                "outgoing_symbol_definition",
+                1,
+                None,
+            ),
+            webhook_edge_signatures,
+        )
+        self.assertIn(
+            (
+                "defines_symbol_used_by_seed",
+                "backend/payments/webhook.py",
+                "backend/payments/service.py",
+                "outgoing_symbol_definition",
+                1,
+                None,
+            ),
+            webhook_edge_signatures,
+        )
+
         for explanation in candidate_explanations:
             self.assertIn("file_path", explanation)
             self.assertIn("kind", explanation)
