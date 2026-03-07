@@ -1,10 +1,10 @@
 import json
-from pathlib import Path
 
 from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.tools.linter import LinterTool
 from ai_code_agent.tools.sandbox import SandboxRunner
+from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
 class TesterAgent(BaseAgent):
     """
@@ -15,7 +15,7 @@ class TesterAgent(BaseAgent):
         """
         Executes unit tests or runs a reproducible script in the Sandbox.
         """
-        workspace_profile = self._detect_workspace_profile(state["workspace_dir"])
+        workspace_profile = detect_workspace_profile(state["workspace_dir"])
         sandbox = SandboxRunner(
             container_image=self.config.docker_image,
             workspace_dir=state["workspace_dir"],
@@ -72,49 +72,9 @@ class TesterAgent(BaseAgent):
             if install_command:
                 commands.append(("package-install", install_command, 900))
 
-            for script_name in ["lint", "typecheck", "build", "test"]:
-                if script_name in workspace_profile.get("scripts", []):
-                    commands.append((f"script:{script_name}", self._run_script_command(workspace_profile, script_name), 900))
+            commands.extend(self._build_javascript_validation_commands(workspace_profile))
 
         return commands
-
-    def _detect_workspace_profile(self, workspace_dir: str) -> dict:
-        root = Path(workspace_dir)
-        package_json_path = root / "package.json"
-        profile = {
-            "has_python": (root / "pyproject.toml").exists(),
-            "has_package_json": package_json_path.exists(),
-            "scripts": [],
-            "frameworks": [],
-            "package_manager": None,
-            "needs_install": not (root / "node_modules").exists(),
-        }
-
-        if package_json_path.exists():
-            try:
-                package_data = json.loads(package_json_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                package_data = {}
-            scripts = package_data.get("scripts", {})
-            deps = {
-                **package_data.get("dependencies", {}),
-                **package_data.get("devDependencies", {}),
-            }
-            profile["scripts"] = sorted(scripts.keys())
-
-            if "next" in deps:
-                profile["frameworks"].append("nextjs")
-            if "@nestjs/core" in deps:
-                profile["frameworks"].append("nestjs")
-
-            if (root / "pnpm-lock.yaml").exists():
-                profile["package_manager"] = "pnpm"
-            elif (root / "yarn.lock").exists():
-                profile["package_manager"] = "yarn"
-            else:
-                profile["package_manager"] = "npm"
-
-        return profile
 
     def _install_command(self, workspace_profile: dict) -> str | None:
         if not workspace_profile.get("needs_install"):
@@ -125,6 +85,8 @@ class TesterAgent(BaseAgent):
             return "pnpm install --frozen-lockfile"
         if package_manager == "yarn":
             return "yarn install --frozen-lockfile"
+        if workspace_profile.get("package_manager") == "npm":
+            return "npm ci" if "package-lock.json" in workspace_profile.get("lockfiles", []) else "npm install"
         return "npm install"
 
     def _run_script_command(self, workspace_profile: dict, script_name: str) -> str:
@@ -134,3 +96,59 @@ class TesterAgent(BaseAgent):
         if package_manager == "yarn":
             return f"yarn {script_name}"
         return f"npm run {script_name}"
+
+    def _build_javascript_validation_commands(self, workspace_profile: dict) -> list[tuple[str, str, int]]:
+        commands: list[tuple[str, str, int]] = []
+        scripts = set(workspace_profile.get("scripts", []))
+
+        if "nextjs" in workspace_profile.get("frameworks", []):
+            commands.extend(self._build_nextjs_commands(workspace_profile, scripts))
+        else:
+            for script_name in ["lint", "typecheck", "build", "test"]:
+                if script_name in scripts:
+                    commands.append((f"script:{script_name}", self._run_script_command(workspace_profile, script_name), 900))
+
+        return commands
+
+    def _build_nextjs_commands(self, workspace_profile: dict, scripts: set[str]) -> list[tuple[str, str, int]]:
+        commands: list[tuple[str, str, int]] = []
+        nextjs_profile = workspace_profile.get("nextjs") or {}
+
+        if "lint" in scripts:
+            commands.append(("script:lint", self._run_script_command(workspace_profile, "lint"), 900))
+        elif self._has_local_bin(workspace_profile, "next"):
+            commands.append(("next:lint", self._exec_command(workspace_profile, "next lint"), 900))
+
+        if "typecheck" in scripts:
+            commands.append(("script:typecheck", self._run_script_command(workspace_profile, "typecheck"), 900))
+        elif self._has_typescript_config(workspace_profile):
+            commands.append(("typescript:noEmit", self._exec_command(workspace_profile, "tsc --noEmit"), 900))
+
+        if "build" in scripts:
+            commands.append(("script:build", self._run_script_command(workspace_profile, "build"), 900))
+        elif self._has_local_bin(workspace_profile, "next"):
+            commands.append(("next:build", self._exec_command(workspace_profile, "next build"), 900))
+
+        if "test" in scripts:
+            commands.append(("script:test", self._run_script_command(workspace_profile, "test"), 900))
+
+        if nextjs_profile.get("router_type") == "app":
+            commands.append(("next:router-detected", "python -c \"print('nextjs app router detected')\"", 30))
+        elif nextjs_profile.get("router_type") == "pages":
+            commands.append(("next:router-detected", "python -c \"print('nextjs pages router detected')\"", 30))
+
+        return commands
+
+    def _exec_command(self, workspace_profile: dict, command: str) -> str:
+        package_manager = workspace_profile.get("package_manager") or "npm"
+        if package_manager == "pnpm":
+            return f"pnpm exec {command}"
+        if package_manager == "yarn":
+            return f"yarn {command}"
+        return f"npx {command}"
+
+    def _has_local_bin(self, workspace_profile: dict, binary_name: str) -> bool:
+        return workspace_profile.get("needs_install") is False
+
+    def _has_typescript_config(self, workspace_profile: dict) -> bool:
+        return bool(workspace_profile.get("tsconfig_exists"))

@@ -7,6 +7,8 @@ You are the Planner Agent. Your job is to read the user's issue and explore the 
 Return a valid JSON object containing:
 - "plan": The step-by-step description of what to do.
 - "files_to_edit": A list of file paths that need modifications.
+- If the workspace_profile indicates Next.js, prioritize route files, layouts, API routes, and shared UI components that match the request.
+- Prefer App Router conventions when router_type is "app" and Pages Router conventions when router_type is "pages".
 """
 
 CODER_SYSTEM_PROMPT = """
@@ -19,6 +21,8 @@ Return a valid JSON object containing:
 - "create_file" and "write_file" require "content".
 - "insert_lines" requires "line_number" and "content".
 - Only propose replacements when the exact search text exists in the provided file content.
+- If the workspace_profile indicates Next.js, prefer route-aware operations that match App Router or Pages Router conventions.
+- When the deterministic Next.js scaffold path can satisfy the request, keep generated operations minimal and framework-consistent.
 """
 
 REVIEWER_SYSTEM_PROMPT = """

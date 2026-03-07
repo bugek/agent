@@ -7,6 +7,7 @@ from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import PLANNER_SYSTEM_PROMPT
 from ai_code_agent.tools.code_search import CodeSearch
+from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
 class PlannerAgent(BaseAgent):
     """
@@ -22,8 +23,9 @@ class PlannerAgent(BaseAgent):
         issue = state["issue_description"]
         search = CodeSearch(state["workspace_dir"])
         keywords = self._extract_keywords(issue)
-        workspace_profile = self._detect_workspace_profile(state["workspace_dir"])
+        workspace_profile = detect_workspace_profile(state["workspace_dir"])
         scored_files = self._score_candidate_files(search, keywords)
+        scored_files = self._merge_scored_files(scored_files, self._score_nextjs_candidates(state["workspace_dir"], workspace_profile, keywords))
 
         candidate_files = [file_path for file_path, _ in scored_files[:10]]
         candidate_files = self._prioritize_profile_files(candidate_files, workspace_profile)
@@ -35,6 +37,7 @@ class PlannerAgent(BaseAgent):
 
         prompt_payload = {
             "issue": issue,
+            "workspace_profile": workspace_profile,
             "candidate_files": candidate_files[:10],
         }
         response = self.llm.generate_json(PLANNER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
@@ -101,66 +104,6 @@ class PlannerAgent(BaseAgent):
     def _skip_file(self, file_path: str) -> bool:
         return file_path.startswith("artifact/") or file_path.startswith(".git/")
 
-    def _detect_workspace_profile(self, workspace_dir: str) -> dict:
-        root = Path(workspace_dir)
-        profile = {
-            "has_python": (root / "pyproject.toml").exists(),
-            "has_package_json": (root / "package.json").exists(),
-            "frameworks": [],
-            "package_manager": None,
-            "scripts": [],
-            "priority_files": [],
-        }
-
-        if profile["has_python"]:
-            profile["frameworks"].append("python")
-            profile["priority_files"].extend(["pyproject.toml"])
-
-        if profile["has_package_json"]:
-            package_json_path = root / "package.json"
-            try:
-                package_data = json.loads(package_json_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                package_data = {}
-
-            dependencies = {
-                **package_data.get("dependencies", {}),
-                **package_data.get("devDependencies", {}),
-            }
-            scripts = package_data.get("scripts", {})
-            profile["scripts"] = sorted(scripts.keys())
-            profile["priority_files"].append("package.json")
-
-            if "next" in dependencies or any((root / name).exists() for name in ["next.config.js", "next.config.mjs", "next.config.ts"]):
-                profile["frameworks"].append("nextjs")
-                profile["priority_files"].extend([
-                    "package.json",
-                    "next.config.js",
-                    "next.config.mjs",
-                    "next.config.ts",
-                    "app/page.tsx",
-                    "src/app/page.tsx",
-                ])
-
-            if "@nestjs/core" in dependencies or (root / "nest-cli.json").exists():
-                profile["frameworks"].append("nestjs")
-                profile["priority_files"].extend([
-                    "package.json",
-                    "nest-cli.json",
-                    "src/app.module.ts",
-                ])
-
-            if (root / "pnpm-lock.yaml").exists():
-                profile["package_manager"] = "pnpm"
-            elif (root / "yarn.lock").exists():
-                profile["package_manager"] = "yarn"
-            elif (root / "package-lock.json").exists():
-                profile["package_manager"] = "npm"
-            else:
-                profile["package_manager"] = "npm"
-
-        return profile
-
     def _prioritize_profile_files(self, candidate_files: list[str], workspace_profile: dict) -> list[str]:
         prioritized: list[str] = []
         seen: set[str] = set()
@@ -185,3 +128,63 @@ class PlannerAgent(BaseAgent):
         if isinstance(plan, list):
             return "\n".join(f"- {item}" for item in plan if isinstance(item, str))
         return ""
+
+    def _score_nextjs_candidates(self, workspace_dir: str, workspace_profile: dict, keywords: list[str]) -> list[tuple[str, int]]:
+        nextjs_profile = workspace_profile.get("nextjs")
+        if not nextjs_profile:
+            return []
+
+        root = Path(workspace_dir)
+        scores: dict[str, int] = defaultdict(int)
+        normalized_keywords = [keyword.lower() for keyword in keywords]
+
+        for file_path in nextjs_profile.get("route_files", []):
+            score = self._score_path_keywords(file_path, normalized_keywords)
+            if file_path.endswith(("page.tsx", "page.ts", "page.jsx", "page.js", "index.tsx", "index.ts", "index.jsx", "index.js")):
+                score += 3
+            if score:
+                scores[file_path] += score
+
+        for file_path in nextjs_profile.get("layout_files", []):
+            score = self._score_path_keywords(file_path, normalized_keywords)
+            scores[file_path] += score + 2
+
+        for file_path in nextjs_profile.get("special_files", []):
+            score = self._score_path_keywords(file_path, normalized_keywords)
+            if score:
+                scores[file_path] += score + 1
+
+        for file_path in nextjs_profile.get("api_routes", []):
+            score = self._score_path_keywords(file_path, normalized_keywords)
+            if score:
+                scores[file_path] += score + 2
+
+        for directory in nextjs_profile.get("component_directories", []):
+            base = root / directory
+            for file_path in base.rglob("*"):
+                if not file_path.is_file() or file_path.suffix not in {".tsx", ".ts", ".jsx", ".js"}:
+                    continue
+                relative_path = file_path.relative_to(root).as_posix()
+                score = self._score_path_keywords(relative_path, normalized_keywords)
+                if score:
+                    scores[relative_path] += score + 1
+
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+
+    def _merge_scored_files(
+        self,
+        base_scores: list[tuple[str, int]],
+        extra_scores: list[tuple[str, int]],
+    ) -> list[tuple[str, int]]:
+        merged: dict[str, int] = defaultdict(int)
+        for file_path, score in [*base_scores, *extra_scores]:
+            merged[file_path] += score
+        return sorted(merged.items(), key=lambda item: (-item[1], item[0]))
+
+    def _score_path_keywords(self, file_path: str, keywords: list[str]) -> int:
+        normalized = file_path.lower()
+        score = 0
+        for keyword in keywords:
+            if keyword in normalized:
+                score += 4
+        return score

@@ -69,8 +69,9 @@ Features:
 2. Understand route, layout, page, component structure
 3. Next-aware planner prompts
 4. Run `build`, `lint`, and optional typecheck
-5. Support creating/updating UI components and routes
+5. Support creating/updating Next.js pages, layouts, UI components, and API routes
 6. Basic frontend design brief support
+7. Distinguish route files, layout files, special app router files, and API routes in planning context
 
 Exit Criteria:
 1. แก้ feature หรือ bug ใน Next.js app ได้อย่างน่าเชื่อถือ
