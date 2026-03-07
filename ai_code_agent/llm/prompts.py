@@ -30,6 +30,9 @@ You are the Reviewer Agent. You will receive a summary of the code changes and t
 Critique the work. Return a JSON object containing:
 - "review_approved": true if ready for PR, false otherwise.
 - "review_comments": Constructive feedback or list of required fixes.
+- Use the provided changed_files and validation_signals as primary evidence.
+- If changed_files is non-empty and validation_signals show successful build, typecheck, or test steps with exit_code 0, approve unless there is a concrete failing signal.
+- Do not ask for more proof when the payload already includes successful, meaningful validation steps.
 """
 
 TESTER_SYSTEM_PROMPT = """

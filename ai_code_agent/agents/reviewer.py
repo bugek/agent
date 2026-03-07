@@ -16,6 +16,8 @@ class ReviewerAgent(BaseAgent):
         """
         analysis_only = bool(re.search(r"\b(analyze|inspect|summari[sz]e|review)\b", state["issue_description"], re.I))
         patches = state.get("patches", [])
+        changed_files = sorted({patch.get("file") for patch in patches if patch.get("file")})
+        validation_signals = self._extract_validation_signals(state.get("test_results", ""))
         comments: list[str] = []
 
         if not state.get("test_passed", False):
@@ -31,6 +33,9 @@ class ReviewerAgent(BaseAgent):
             "issue": state["issue_description"],
             "test_results": state.get("test_results", ""),
             "patch_count": len(patches),
+            "changed_files": changed_files,
+            "validation_signals": validation_signals,
+            "codegen_summary": state.get("codegen_summary", {}),
             "analysis_only": analysis_only,
         }
         llm_review = self.llm.generate_json(REVIEWER_SYSTEM_PROMPT, json.dumps(review_payload, indent=2))
@@ -47,3 +52,12 @@ class ReviewerAgent(BaseAgent):
             "review_approved": review_approved,
             "review_comments": comments,
         }
+
+    def _extract_validation_signals(self, test_results: str) -> list[dict[str, object]]:
+        signals: list[dict[str, object]] = []
+        for match in re.finditer(r"^([A-Za-z0-9:_-]+)\(exit=(\d+)\):", test_results or "", re.M):
+            signals.append({
+                "label": match.group(1),
+                "exit_code": int(match.group(2)),
+            })
+        return signals

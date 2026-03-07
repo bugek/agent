@@ -103,6 +103,8 @@ class TesterAgent(BaseAgent):
 
         if "nextjs" in workspace_profile.get("frameworks", []):
             commands.extend(self._build_nextjs_commands(workspace_profile, scripts))
+        elif "nestjs" in workspace_profile.get("frameworks", []):
+            commands.extend(self._build_nestjs_commands(workspace_profile, scripts))
         else:
             for script_name in ["lint", "typecheck", "build", "test"]:
                 if script_name in scripts:
@@ -136,6 +138,37 @@ class TesterAgent(BaseAgent):
             commands.append(("next:router-detected", "python -c \"print('nextjs app router detected')\"", 30))
         elif nextjs_profile.get("router_type") == "pages":
             commands.append(("next:router-detected", "python -c \"print('nextjs pages router detected')\"", 30))
+
+        return commands
+
+    def _build_nestjs_commands(self, workspace_profile: dict, scripts: set[str]) -> list[tuple[str, str, int]]:
+        commands: list[tuple[str, str, int]] = []
+        nestjs_profile = workspace_profile.get("nestjs") or {}
+        has_typescript = bool(nestjs_profile.get("has_typescript"))
+        has_nest_cli = bool(nestjs_profile.get("has_nest_cli"))
+
+        if "lint" in scripts:
+            commands.append(("script:lint", self._run_script_command(workspace_profile, "lint"), 900))
+
+        if "typecheck" in scripts:
+            commands.append(("script:typecheck", self._run_script_command(workspace_profile, "typecheck"), 900))
+        elif has_typescript and self._has_typescript_config(workspace_profile):
+            tsconfig_build = nestjs_profile.get("tsconfig_build") or "tsconfig.build.json"
+            if tsconfig_build in workspace_profile.get("priority_files", []):
+                commands.append(("typescript:build-check", self._exec_command(workspace_profile, f"tsc -p {tsconfig_build} --noEmit"), 900))
+            else:
+                commands.append(("typescript:noEmit", self._exec_command(workspace_profile, "tsc --noEmit"), 900))
+
+        if "build" in scripts:
+            commands.append(("script:build", self._run_script_command(workspace_profile, "build"), 900))
+        elif has_nest_cli and self._has_local_bin(workspace_profile, "nest"):
+            commands.append(("nest:build", self._exec_command(workspace_profile, "nest build"), 900))
+
+        if "test" in scripts:
+            commands.append(("script:test", self._run_script_command(workspace_profile, "test"), 900))
+
+        main_file = nestjs_profile.get("main_file") or "src/main.ts"
+        commands.append(("nest:structure-detected", f"python -c \"print('nestjs workspace detected: {main_file}')\"", 30))
 
         return commands
 

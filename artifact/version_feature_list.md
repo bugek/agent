@@ -84,13 +84,15 @@ Exit Criteria:
 Features:
 1. Detect NestJS modules, controllers, services, DTOs
 2. Nest-aware planner prompts
-3. Support backend file scaffolding
-4. Run build, lint, and test commands
+3. Support backend file scaffolding and app module wiring
+4. Run build, lint, typecheck, and test commands
 5. Understand API flow across module boundaries
+6. Target feature directories from route, resource, and endpoint language in issues
 
 Exit Criteria:
 1. แก้ controller/service/module flows ได้
 2. เพิ่ม endpoint หรือ service logic ใหม่ได้
+3. register feature modules into the root application module when needed
 
 ## v0.6.0 Hybrid Retrieval
 

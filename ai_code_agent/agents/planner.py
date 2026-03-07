@@ -26,6 +26,7 @@ class PlannerAgent(BaseAgent):
         workspace_profile = detect_workspace_profile(state["workspace_dir"])
         scored_files = self._score_candidate_files(search, keywords)
         scored_files = self._merge_scored_files(scored_files, self._score_nextjs_candidates(state["workspace_dir"], workspace_profile, keywords))
+        scored_files = self._merge_scored_files(scored_files, self._score_nestjs_candidates(workspace_profile, keywords))
 
         candidate_files = [file_path for file_path, _ in scored_files[:10]]
         candidate_files = self._prioritize_profile_files(candidate_files, workspace_profile)
@@ -188,3 +189,38 @@ class PlannerAgent(BaseAgent):
             if keyword in normalized:
                 score += 4
         return score
+
+    def _score_nestjs_candidates(self, workspace_profile: dict, keywords: list[str]) -> list[tuple[str, int]]:
+        nestjs_profile = workspace_profile.get("nestjs")
+        if not nestjs_profile:
+            return []
+
+        scores: dict[str, int] = defaultdict(int)
+        normalized_keywords = [keyword.lower() for keyword in keywords]
+        weighted_groups = [
+            (nestjs_profile.get("module_files", []), 3),
+            (nestjs_profile.get("controller_files", []), 4),
+            (nestjs_profile.get("service_files", []), 4),
+            (nestjs_profile.get("dto_files", []), 3),
+            (nestjs_profile.get("entity_files", []), 2),
+            (nestjs_profile.get("guard_files", []), 2),
+            (nestjs_profile.get("pipe_files", []), 2),
+            (nestjs_profile.get("interceptor_files", []), 2),
+            (nestjs_profile.get("middleware_files", []), 2),
+        ]
+
+        for file_group, base_score in weighted_groups:
+            for file_path in file_group:
+                score = self._score_path_keywords(file_path, normalized_keywords)
+                if score or base_score >= 3:
+                    scores[file_path] += score + base_score
+
+        main_file = nestjs_profile.get("main_file")
+        if main_file:
+            scores[main_file] += 2
+
+        app_module_file = nestjs_profile.get("app_module_file")
+        if app_module_file:
+            scores[app_module_file] += 4
+
+        return sorted(scores.items(), key=lambda item: (-item[1], item[0]))

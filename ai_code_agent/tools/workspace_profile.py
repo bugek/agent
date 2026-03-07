@@ -105,8 +105,55 @@ def _detect_nextjs_profile(root: Path, dependencies: dict[str, Any]) -> dict[str
 def _detect_nestjs_profile(root: Path, dependencies: dict[str, Any]) -> dict[str, Any] | None:
     if "@nestjs/core" not in dependencies and not (root / "nest-cli.json").exists():
         return None
-    priority_files = ["package.json", "nest-cli.json", "src/main.ts", "src/app.module.ts"]
+    source_root = "src" if (root / "src").exists() else "."
+    main_file = f"{source_root}/main.ts"
+    app_module_file = f"{source_root}/app.module.ts"
+    module_files = _collect_suffix_files(root, source_root, ".module.ts")
+    controller_files = _collect_suffix_files(root, source_root, ".controller.ts")
+    service_files = _collect_suffix_files(root, source_root, ".service.ts")
+    dto_files = _collect_relative_files(root, source_root, ["dto.ts"])
+    dto_files.extend(_collect_glob_files(root, source_root, "dto/*.ts"))
+    dto_files.extend(_collect_glob_files(root, source_root, "**/dto/*.ts"))
+    entity_files = _collect_suffix_files(root, source_root, ".entity.ts")
+    guard_files = _collect_suffix_files(root, source_root, ".guard.ts")
+    pipe_files = _collect_suffix_files(root, source_root, ".pipe.ts")
+    interceptor_files = _collect_suffix_files(root, source_root, ".interceptor.ts")
+    middleware_files = _collect_suffix_files(root, source_root, ".middleware.ts")
+    feature_directories = _collect_nest_feature_directories(
+        module_files,
+        controller_files,
+        service_files,
+        dto_files,
+    )
+    priority_files = [
+        "package.json",
+        "nest-cli.json",
+        "tsconfig.json",
+        "tsconfig.build.json",
+        main_file,
+        app_module_file,
+        *module_files[:6],
+        *controller_files[:6],
+        *service_files[:6],
+        *dto_files[:4],
+    ]
     return {
+        "source_root": source_root,
+        "has_typescript": "typescript" in dependencies,
+        "has_nest_cli": "@nestjs/cli" in dependencies,
+        "tsconfig_build": "tsconfig.build.json" if (root / "tsconfig.build.json").exists() else None,
+        "main_file": main_file if (root / main_file).exists() else None,
+        "app_module_file": app_module_file if (root / app_module_file).exists() else None,
+        "module_files": sorted(set(module_files)),
+        "controller_files": sorted(set(controller_files)),
+        "service_files": sorted(set(service_files)),
+        "dto_files": sorted(set(dto_files)),
+        "entity_files": sorted(set(entity_files)),
+        "guard_files": sorted(set(guard_files)),
+        "pipe_files": sorted(set(pipe_files)),
+        "interceptor_files": sorted(set(interceptor_files)),
+        "middleware_files": sorted(set(middleware_files)),
+        "feature_directories": feature_directories,
         "priority_files": _deduplicate_existing_paths(root, priority_files),
     }
 
@@ -157,6 +204,46 @@ def _collect_api_routes(root: Path, app_dir: str | None, pages_dir: str | None) 
 
 def _existing_relative_dirs(root: Path, directories: list[str]) -> list[str]:
     return [directory.replace("\\", "/") for directory in directories if (root / directory).exists()]
+
+
+def _collect_suffix_files(root: Path, relative_dir: str | None, suffix: str) -> list[str]:
+    if relative_dir is None:
+        return []
+    base = root / relative_dir
+    if not base.exists():
+        return []
+    results: list[str] = []
+    for file_path in base.rglob(f"*{suffix}"):
+        if file_path.is_file():
+            results.append(file_path.relative_to(root).as_posix())
+    return sorted(results)
+
+
+def _collect_glob_files(root: Path, relative_dir: str | None, pattern: str) -> list[str]:
+    if relative_dir is None:
+        return []
+    base = root / relative_dir
+    if not base.exists():
+        return []
+    results: list[str] = []
+    for file_path in base.glob(pattern):
+        if file_path.is_file():
+            results.append(file_path.relative_to(root).as_posix())
+    return sorted(results)
+
+
+def _collect_nest_feature_directories(*file_groups: list[str]) -> list[str]:
+    feature_directories: list[str] = []
+    seen: set[str] = set()
+    for file_group in file_groups:
+        for file_path in file_group:
+            directory = str(Path(file_path).parent).replace("\\", "/")
+            if directory in {".", "src/dto", "src/common", "src"}:
+                continue
+            if directory not in seen:
+                feature_directories.append(directory)
+                seen.add(directory)
+    return sorted(feature_directories)
 
 
 def _deduplicate_existing_paths(root: Path, paths: list[str]) -> list[str]:

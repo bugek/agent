@@ -38,6 +38,10 @@ class CoderAgent(BaseAgent):
         if nextjs_operations:
             return self._apply_operations(editor, state, nextjs_operations, generated_by="nextjs_scaffold")
 
+        nestjs_operations = self._build_nestjs_operations(state, workspace_profile, editor)
+        if nestjs_operations:
+            return self._apply_operations(editor, state, nestjs_operations, generated_by="nestjs_scaffold")
+
         candidate_files = [
             file_path for file_path in state.get("files_to_edit", []) if self._exists(state, file_path)
         ][:5]
@@ -252,6 +256,97 @@ class CoderAgent(BaseAgent):
 
         return deduplicated
 
+    def _build_nestjs_operations(
+        self,
+        state: AgentState,
+        workspace_profile: dict[str, Any],
+        editor: FileEditor,
+    ) -> list[dict[str, Any]]:
+        nestjs_profile = workspace_profile.get("nestjs")
+        if not nestjs_profile:
+            return []
+
+        issue = state["issue_description"]
+        lower_issue = issue.lower()
+        if not re.search(r"\b(nest|nestjs|module|controller|service|dto|endpoint|api|resource|provider)\b", lower_issue):
+            return []
+
+        feature_slug = self._extract_nest_feature_slug(issue)
+        feature_name = feature_slug.split("/")[-1]
+        source_root = nestjs_profile.get("source_root") or "src"
+        feature_dir = f"{source_root}/{feature_slug}" if feature_slug else source_root
+        action = "write_file" if re.search(r"\b(update|modify|refactor|revamp|rewrite|redesign)\b", lower_issue) else "create_file"
+
+        wants_controller = bool(re.search(r"\b(controller|endpoint|api|route|http|get|post|put|patch|delete)\b", lower_issue))
+        wants_service = bool(re.search(r"\b(service|provider|logic|business)\b", lower_issue)) or wants_controller
+        wants_module = bool(re.search(r"\b(module|resource|feature)\b", lower_issue)) or wants_controller or wants_service
+        wants_dto = bool(re.search(r"\b(dto|payload|body|request|input|create|post|put|patch)\b", lower_issue))
+
+        http_method = self._extract_http_method(lower_issue)
+        route_path = self._extract_nest_route_path(issue, feature_name)
+
+        operations: list[dict[str, Any]] = []
+        dto_class_name = f"Create{self._to_component_name(feature_name)}Dto"
+        dto_file = f"{feature_dir}/dto/create-{self._slugify(feature_name)}.dto.ts"
+        service_file = f"{feature_dir}/{self._slugify(feature_name)}.service.ts"
+        controller_file = f"{feature_dir}/{self._slugify(feature_name)}.controller.ts"
+        module_file = f"{feature_dir}/{self._slugify(feature_name)}.module.ts"
+
+        if wants_dto:
+            operations.append(
+                self._file_operation(
+                    editor,
+                    dto_file,
+                    self._nest_dto_template(dto_class_name, issue),
+                    preferred_action=action,
+                )
+            )
+
+        if wants_service:
+            operations.append(
+                self._file_operation(
+                    editor,
+                    service_file,
+                    self._nest_service_template(feature_name, dto_class_name, wants_dto, http_method),
+                    preferred_action=action,
+                )
+            )
+
+        if wants_controller:
+            operations.append(
+                self._file_operation(
+                    editor,
+                    controller_file,
+                    self._nest_controller_template(feature_name, route_path, dto_class_name, wants_dto, http_method),
+                    preferred_action=action,
+                )
+            )
+
+        if wants_module:
+            operations.append(
+                self._file_operation(
+                    editor,
+                    module_file,
+                    self._nest_module_template(feature_name, wants_controller, wants_service),
+                    preferred_action=action,
+                )
+            )
+
+        app_module_operation = self._build_nest_app_module_operation(editor, nestjs_profile, feature_name, module_file)
+        if app_module_operation is not None:
+            operations.append(app_module_operation)
+
+        deduplicated: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for operation in operations:
+            file_path = operation.get("file_path")
+            if not file_path or file_path in seen_paths:
+                continue
+            deduplicated.append(operation)
+            seen_paths.add(file_path)
+
+        return deduplicated
+
     def _file_operation(self, editor: FileEditor, file_path: str, content: str, preferred_action: str) -> dict[str, Any]:
         exists = editor.exists(file_path)
         operation_type = preferred_action if exists else "create_file"
@@ -445,6 +540,238 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
+    def _extract_nest_feature_slug(self, issue: str) -> str:
+        explicit_route = re.search(r"/(?:api/)?([a-z0-9\-/]+)", issue.lower())
+        if explicit_route:
+            return explicit_route.group(1).strip("/")
+
+        noun_match = re.search(
+            r"\b([a-z0-9-]+)\s+(?:module|controller|service|dto|endpoint|resource|api)\b",
+            issue.lower(),
+        )
+        if noun_match:
+            return noun_match.group(1)
+
+        preferred_terms = [
+            "users",
+            "auth",
+            "orders",
+            "billing",
+            "products",
+            "notifications",
+            "reports",
+            "analytics",
+            "profile",
+        ]
+        lower_issue = issue.lower()
+        for term in preferred_terms:
+            if term in lower_issue:
+                return term
+
+        tokens = [
+            token
+            for token in re.findall(r"[a-z0-9-]+", lower_issue)
+            if token not in {"add", "create", "update", "new", "nest", "nestjs", "module", "controller", "service", "dto", "endpoint", "api", "resource"}
+        ]
+        return tokens[0] if tokens else "feature"
+
+    def _extract_nest_route_path(self, issue: str, fallback: str) -> str:
+        explicit_route = re.search(r"/(?:api/)?([a-z0-9\-/]+)", issue.lower())
+        if explicit_route:
+            return explicit_route.group(1).strip("/")
+        return self._slugify(fallback)
+
+    def _extract_http_method(self, issue: str) -> str:
+        if re.search(r"\b(post|create)\b", issue):
+            return "POST"
+        if re.search(r"\b(put|replace)\b", issue):
+            return "PUT"
+        if re.search(r"\b(patch|update)\b", issue):
+            return "PATCH"
+        if re.search(r"\b(delete|remove)\b", issue):
+            return "DELETE"
+        return "GET"
+
+    def _nest_module_template(self, feature_name: str, has_controller: bool, has_service: bool) -> str:
+        class_name = self._to_component_name(feature_name)
+        controller_import = f'import {{ {class_name}Controller }} from "./{self._slugify(feature_name)}.controller";\n' if has_controller else ""
+        service_import = f'import {{ {class_name}Service }} from "./{self._slugify(feature_name)}.service";\n' if has_service else ""
+        controllers = f"[{class_name}Controller]" if has_controller else "[]"
+        providers = f"[{class_name}Service]" if has_service else "[]"
+        return (
+            'import { Module } from "@nestjs/common";\n'
+            f"{controller_import}"
+            f"{service_import}"
+            "\n"
+            "@Module({\n"
+            f"  controllers: {controllers},\n"
+            f"  providers: {providers},\n"
+            "})\n"
+            f"export class {class_name}Module {{}}\n"
+        )
+
+    def _nest_controller_template(
+        self,
+        feature_name: str,
+        route_path: str,
+        dto_class_name: str,
+        has_dto: bool,
+        http_method: str,
+    ) -> str:
+        class_name = self._to_component_name(feature_name)
+        decorators = ["Controller"]
+        imports = ["Controller"]
+        method_name = "list"
+        service_call = f"this.{self._camel_case(feature_name)}Service.list()"
+        method_signature = f"get{class_name}()"
+        body_argument = ""
+
+        if http_method == "POST":
+            decorators.append("Post")
+            imports.extend(["Body", "Post"])
+            method_name = "create"
+            service_call = f"this.{self._camel_case(feature_name)}Service.create(input)"
+            method_signature = f"create{class_name}(@Body() input: {dto_class_name})"
+            body_argument = f'import {{ {dto_class_name} }} from "./dto/create-{self._slugify(feature_name)}.dto";\n'
+        elif http_method == "PUT":
+            decorators.append("Put")
+            imports.extend(["Body", "Put"])
+            method_name = "replace"
+            service_call = f"this.{self._camel_case(feature_name)}Service.replace(input)"
+            method_signature = f"replace{class_name}(@Body() input: {dto_class_name})"
+            body_argument = f'import {{ {dto_class_name} }} from "./dto/create-{self._slugify(feature_name)}.dto";\n'
+        elif http_method == "PATCH":
+            decorators.append("Patch")
+            imports.extend(["Body", "Patch"])
+            method_name = "update"
+            service_call = f"this.{self._camel_case(feature_name)}Service.update(input)"
+            method_signature = f"update{class_name}(@Body() input: {dto_class_name})"
+            body_argument = f'import {{ {dto_class_name} }} from "./dto/create-{self._slugify(feature_name)}.dto";\n'
+        elif http_method == "DELETE":
+            decorators.append("Delete")
+            imports.append("Delete")
+            method_name = "remove"
+            service_call = f"this.{self._camel_case(feature_name)}Service.remove()"
+            method_signature = f"remove{class_name}()"
+        else:
+            decorators.append("Get")
+            imports.append("Get")
+
+        imports = sorted(set(imports))
+        http_decorator = decorators[-1]
+        dto_import = body_argument if has_dto and http_method in {"POST", "PUT", "PATCH"} else ""
+        return (
+            f'import {{ {", ".join(imports)} }} from "@nestjs/common";\n'
+            f'import {{ {class_name}Service }} from "./{self._slugify(feature_name)}.service";\n'
+            f"{dto_import}"
+            "\n"
+            f'@Controller("{route_path}")\n'
+            f"export class {class_name}Controller {{\n"
+            f"  constructor(private readonly {self._camel_case(feature_name)}Service: {class_name}Service) {{}}\n\n"
+            f"  @{http_decorator}()\n"
+            f"  {method_signature} {{\n"
+            f"    return {service_call};\n"
+            "  }\n"
+            "}\n"
+        )
+
+    def _nest_service_template(self, feature_name: str, dto_class_name: str, has_dto: bool, http_method: str) -> str:
+        class_name = self._to_component_name(feature_name)
+        dto_import = f'import {{ {dto_class_name} }} from "./dto/create-{self._slugify(feature_name)}.dto";\n' if has_dto else ""
+
+        methods = [
+            "  list() {",
+            f'    return [{{ id: "{self._slugify(feature_name)}-1", name: "Sample {self._humanize_identifier(feature_name)}" }}];',
+            "  }",
+        ]
+        if http_method in {"POST", "PUT", "PATCH"}:
+            service_method = "create" if http_method == "POST" else "replace" if http_method == "PUT" else "update"
+            methods.extend(
+                [
+                    "",
+                    f"  {service_method}(input: {dto_class_name}) {{",
+                    f'    return {{ id: "{self._slugify(feature_name)}-1", ...input }};',
+                    "  }",
+                ]
+            )
+        if http_method == "DELETE":
+            methods.extend(
+                [
+                    "",
+                    "  remove() {",
+                    '    return { ok: true };',
+                    "  }",
+                ]
+            )
+
+        return (
+            'import { Injectable } from "@nestjs/common";\n'
+            f"{dto_import}"
+            "\n"
+            "@Injectable()\n"
+            f"export class {class_name}Service {{\n"
+            + "\n".join(methods)
+            + "\n}\n"
+        )
+
+    def _nest_dto_template(self, dto_class_name: str, issue: str) -> str:
+        field_name = "name"
+        if re.search(r"\b(email)\b", issue.lower()):
+            field_name = "email"
+        elif re.search(r"\b(title)\b", issue.lower()):
+            field_name = "title"
+        elif re.search(r"\b(status)\b", issue.lower()):
+            field_name = "status"
+        return (
+            f"export class {dto_class_name} {{\n"
+            f"  {field_name}!: string;\n"
+            "}\n"
+        )
+
+    def _build_nest_app_module_operation(
+        self,
+        editor: FileEditor,
+        nestjs_profile: dict[str, Any],
+        feature_name: str,
+        module_file: str,
+    ) -> dict[str, Any] | None:
+        app_module_file = nestjs_profile.get("app_module_file")
+        if not app_module_file or not editor.exists(app_module_file):
+            return None
+
+        current_content = editor.view_file(app_module_file)
+        module_class_name = f"{self._to_component_name(feature_name)}Module"
+        if module_class_name in current_content:
+            return None
+
+        import_path = self._relative_import(app_module_file, module_file)
+        import_statement = f'import {{ {module_class_name} }} from "{import_path}";'
+        updated_content = current_content
+        if import_statement not in updated_content:
+            updated_content = f"{import_statement}\n{updated_content}"
+
+        imports_match = re.search(r"imports:\s*\[(.*?)\]", updated_content, re.S)
+        if imports_match is not None:
+            existing_imports = imports_match.group(1).strip()
+            replacement = f"imports: [{existing_imports}, {module_class_name}]" if existing_imports else f"imports: [{module_class_name}]"
+            updated_content = (
+                updated_content[:imports_match.start()]
+                + replacement
+                + updated_content[imports_match.end():]
+            )
+        else:
+            module_match = re.search(r"@Module\(\{", updated_content)
+            if module_match is None:
+                return None
+            insert_index = module_match.end()
+            updated_content = f"{updated_content[:insert_index]}\n  imports: [{module_class_name}],{updated_content[insert_index:]}"
+
+        return {
+            "type": "write_file",
+            "file_path": app_module_file,
+            "content": updated_content,
+        }
+
     def _relative_import(self, from_file: str, to_file: str) -> str:
         from posixpath import relpath
         base_dir = PurePosixPath(from_file).parent
@@ -458,6 +785,10 @@ class CoderAgent(BaseAgent):
     def _to_component_name(self, value: str) -> str:
         tokens = re.findall(r"[A-Za-z0-9]+", value)
         return "".join(token.capitalize() for token in tokens) or "FeatureComponent"
+
+    def _camel_case(self, value: str) -> str:
+        component_name = self._to_component_name(value)
+        return component_name[:1].lower() + component_name[1:] if component_name else "feature"
 
     def _slugify(self, value: str) -> str:
         tokens = re.findall(r"[A-Za-z0-9]+", value.lower())

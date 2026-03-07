@@ -44,8 +44,11 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - The tester can detect `npm`, `pnpm`, and `yarn` and will run install/build/lint/test scripts when present.
 - Framework markers for Next.js and NestJS are detected so planner and tester behavior can become framework-aware over time.
 - Next.js workspaces are profiled for app router vs pages router, route files, layouts, API routes, and component directories.
+- NestJS workspaces are profiled for root bootstrap files, modules, controllers, services, DTOs, and common HTTP-layer primitives.
 - The tester can prefer Next.js-specific lint, typecheck, and build validation paths when a Next.js workspace is detected.
+- The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
+- The coder can deterministically scaffold NestJS modules, controllers, services, DTOs, and root module registration for common backend feature requests.
 
 ## Getting Started
 
