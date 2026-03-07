@@ -76,6 +76,7 @@ def cli(argv: list[str] | None = None):
         "error_message": None,
         "created_pr_url": None,
         "execution_log": [],
+        "execution_events": [],
     }
 
     # Run the graph
@@ -92,6 +93,8 @@ def cli(argv: list[str] | None = None):
         print(f"Patches generated: {len(final_state.get('patches', []))}")
         print(f"Tests passed: {final_state.get('test_passed', False)}")
         print(f"Review approved: {final_state.get('review_approved', False)}")
+        if final_state.get("execution_events"):
+            print(f"Execution events: {len(final_state['execution_events'])}")
         if final_state.get("review_comments"):
             print("Review comments:")
             for comment in final_state["review_comments"]:

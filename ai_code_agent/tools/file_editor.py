@@ -12,6 +12,16 @@ class FileEditor:
         if path.is_absolute():
             return path
         return Path(self.workspace) / path
+
+    def exists(self, file_path: str) -> bool:
+        """Return whether a file exists inside the workspace."""
+        return self._resolve_path(file_path).exists()
+
+    def ensure_parent(self, file_path: str) -> Path:
+        """Ensure the parent directory exists and return the resolved path."""
+        path = self._resolve_path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
         
     def view_file(self, file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         """Returns the content of a file, optionally bounded by line numbers."""
@@ -46,6 +56,12 @@ class FileEditor:
         path.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
         return True
 
+    def write_file(self, file_path: str, content: str) -> bool:
+        """Write a file, creating parent directories as needed."""
+        path = self.ensure_parent(file_path)
+        path.write_text(content, encoding="utf-8")
+        return True
+
     def insert_lines(self, file_path: str, line_number: int, new_content: str) -> bool:
         """Insert content before the requested 1-based line number."""
         path = self._resolve_path(file_path)
@@ -59,9 +75,16 @@ class FileEditor:
         
     def create_file(self, file_path: str, content: str) -> bool:
         """Create a new file with content."""
-        path = self._resolve_path(file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path = self.ensure_parent(file_path)
         if path.exists():
             return False
         path.write_text(content, encoding="utf-8")
+        return True
+
+    def delete_file(self, file_path: str) -> bool:
+        """Delete a file if it exists."""
+        path = self._resolve_path(file_path)
+        if not path.exists() or not path.is_file():
+            return False
+        path.unlink()
         return True

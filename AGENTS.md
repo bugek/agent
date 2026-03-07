@@ -37,11 +37,19 @@ We use a Multi-Agent architecture orchestrated via a State Machine. When `langgr
 Use `LLM_PROVIDER=openrouter` with `OPENROUTER_API_KEY` and optionally `OPENROUTER_MODEL` to select the routed model.
 You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TESTER_MODEL`, and `REVIEWER_MODEL`.
 
+## Runtime Support
+
+- Python repositories are validated with compile and CLI smoke checks.
+- JavaScript and TypeScript repositories are detected from `package.json` and lockfiles.
+- The tester can detect `npm`, `pnpm`, and `yarn` and will run install/build/lint/test scripts when present.
+- Framework markers for Next.js and NestJS are detected so planner and tester behavior can become framework-aware over time.
+
 ## Getting Started
 
 1. Copy `.env.example` to `.env` and fill in credentials.
 2. Install dependencies via `poetry install`.
 3. Build the sandbox image if you want Docker-backed execution: `docker build -t ai-code-agent-sandbox:latest .`
 4. Run the CLI for an issue workflow: `poetry run ai-code-agent run --issue <issue_url> --repo <path>`
-5. Run the CLI without API keys to use fallback mode for planning and smoke-test execution only.
-6. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.
+5. For repository readiness analysis, use a descriptive issue such as `poetry run ai-code-agent run --issue "analyze current repository and summarize readiness" --repo <path>`.
+6. Run the CLI without API keys to use fallback mode for planning and smoke-test execution only.
+7. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.

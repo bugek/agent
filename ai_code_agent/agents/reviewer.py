@@ -37,7 +37,7 @@ class ReviewerAgent(BaseAgent):
         comments.extend(llm_review.get("review_comments", []))
 
         review_approved = state.get("test_passed", False) and (analysis_only or bool(patches))
-        if "review_approved" in llm_review:
+        if not analysis_only and "review_approved" in llm_review:
             review_approved = review_approved and bool(llm_review["review_approved"])
 
         if not comments:

@@ -38,6 +38,10 @@ class AgentState(TypedDict, total=False):
     error_message: Optional[str]
     created_pr_url: Optional[str]
     execution_log: list[str]
+    execution_events: list[dict[str, Any]]
+    planning_context: dict[str, Any]
+    codegen_summary: dict[str, Any]
+    workspace_profile: dict[str, Any]
 
 
 def _build_runtime() -> tuple[AgentConfig, LLMClient]:
@@ -52,6 +56,19 @@ def _merge_logs(state: AgentState, message: str) -> list[str]:
     return current_logs
 
 
+def _append_event(state: AgentState, node: str, status: str, details: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    events = list(state.get("execution_events", []))
+    event: dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "node": node,
+        "status": status,
+    }
+    if details:
+        event["details"] = details
+    events.append(event)
+    return events
+
+
 def plan_node(state: AgentState) -> dict[str, Any]:
     """Invokes the Planner agent."""
     from ai_code_agent.agents.planner import PlannerAgent
@@ -61,6 +78,12 @@ def plan_node(state: AgentState) -> dict[str, Any]:
     agent = PlannerAgent(config, llm)
     result = agent.run(state)
     result["execution_log"] = _merge_logs(state, "Planner agent completed.")
+    result["execution_events"] = _append_event(
+        state,
+        "plan",
+        "completed",
+        {"files_to_edit": len(result.get("files_to_edit", []))},
+    )
     return result
 
 def code_node(state: AgentState) -> dict[str, Any]:
@@ -75,6 +98,15 @@ def code_node(state: AgentState) -> dict[str, Any]:
         state,
         f"Coder agent completed with {len(result.get('patches', []))} patch(es).",
     )
+    result["execution_events"] = _append_event(
+        state,
+        "code",
+        "completed",
+        {
+            "patches": len(result.get("patches", [])),
+            "requested_operations": result.get("codegen_summary", {}).get("requested_operations", 0),
+        },
+    )
     return result
 
 def test_node(state: AgentState) -> dict[str, Any]:
@@ -86,6 +118,12 @@ def test_node(state: AgentState) -> dict[str, Any]:
     agent = TesterAgent(config, llm)
     result = agent.run(state)
     result["execution_log"] = _merge_logs(state, "Tester agent completed.")
+    result["execution_events"] = _append_event(
+        state,
+        "test",
+        "completed",
+        {"test_passed": result.get("test_passed", False)},
+    )
     return result
 
 def review_node(state: AgentState) -> dict[str, Any]:
@@ -104,6 +142,15 @@ def review_node(state: AgentState) -> dict[str, Any]:
     result["execution_log"] = _merge_logs(
         state,
         f"Reviewer agent completed with status: {'approved' if approved else 'changes required'}.",
+    )
+    result["execution_events"] = _append_event(
+        state,
+        "review",
+        "completed",
+        {
+            "review_approved": result.get("review_approved", False),
+            "retry_count": result.get("retry_count", state.get("retry_count", 0)),
+        },
     )
     return result
 
@@ -128,6 +175,7 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
     return {
         "created_pr_url": created_pr_url,
         "execution_log": _merge_logs(state, message),
+        "execution_events": _append_event(state, "create_pr", "completed", {"created_pr_url": created_pr_url}),
         "error_message": state.get("error_message"),
     }
 

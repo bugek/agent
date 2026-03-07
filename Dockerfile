@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
+RUN npm install -g pnpm yarn
+
 # Set up a generic non-root user for running code safely
 RUN useradd -m sandboxuser
 WORKDIR /home/sandboxuser/workspace
