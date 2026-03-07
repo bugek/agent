@@ -130,6 +130,7 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - `artifact/run_retrieval_eval.py`: Benchmark runner that compares `baseline` and `hybrid` retrieval modes.
 - `artifact/fixtures/retrieval-eval-sample/`: Sample repository for retrieval benchmarking across backend and frontend cases.
 - `ai_code_agent/validation.py`: Single entrypoint that runs compile checks, unit tests, and retrieval evaluation in sequence.
+- `.github/workflows/validation.yml`: GitHub Actions workflow that runs the unified validation suite on `push` and `pull_request`.
 
 Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner behavior. The benchmark reports precision@k, recall@k, reciprocal rank, and NDCG@k.
 
