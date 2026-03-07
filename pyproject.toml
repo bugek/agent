@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "ai-code-agent"
+version = "0.1.0"
+description = "Autonomous AI Agent for fixing code issues and creating PRs"
+authors = ["Your Name <your.email@example.com>"]
+readme = "AGENTS.md"
+packages = [{include = "ai_code_agent"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+langchain = "^0.1.0"
+langgraph = "^0.0.26"
+anthropic = "^0.18.0"
+openai = "^1.12.0"
+pygithub = "^2.2.0"
+fastapi = "^0.109.0"
+uvicorn = "^0.27.0"
+docker = "^7.0.0"
+python-dotenv = "^1.0.1"
+
+[tool.poetry.scripts]
+ai-code-agent = "ai_code_agent.main:cli"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
