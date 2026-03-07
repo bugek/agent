@@ -56,6 +56,53 @@ class PlannerCandidateExplanationsTest(unittest.TestCase):
         self.assertTrue(webhook_explanation["reasons"])
         self.assertTrue(webhook_explanation["explanation_edges"])
 
+        webhook_keyword_edges = {
+            (
+                edge["edge_type"],
+                edge.get("source_keyword"),
+                edge.get("target_symbol"),
+                edge["target_file"],
+            )
+            for edge in webhook_explanation["explanation_edges"]
+            if edge["edge_type"] in {"path_token_match", "import_token_match"}
+        }
+        self.assertIn(
+            (
+                "path_token_match",
+                "payment",
+                "payment",
+                "backend/payments/webhook.py",
+            ),
+            webhook_keyword_edges,
+        )
+        self.assertIn(
+            (
+                "path_token_match",
+                "webhook",
+                "webhook",
+                "backend/payments/webhook.py",
+            ),
+            webhook_keyword_edges,
+        )
+        self.assertIn(
+            (
+                "import_token_match",
+                "event",
+                "event",
+                "backend/payments/webhook.py",
+            ),
+            webhook_keyword_edges,
+        )
+        self.assertIn(
+            (
+                "import_token_match",
+                "payment",
+                "payment",
+                "backend/payments/webhook.py",
+            ),
+            webhook_keyword_edges,
+        )
+
         webhook_edge_signatures = {
             (
                 edge["edge_type"],
@@ -148,6 +195,9 @@ class PlannerCandidateExplanationsTest(unittest.TestCase):
                 self.assertIn("target_file", edge)
                 self.assertIn("direction", edge)
                 self.assertIn("depth", edge)
+                if edge["edge_type"] in {"path_token_match", "symbol_match", "import_token_match"}:
+                    self.assertIn("source_keyword", edge)
+                    self.assertIn("target_symbol", edge)
 
 
 if __name__ == "__main__":
