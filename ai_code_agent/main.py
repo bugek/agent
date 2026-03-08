@@ -142,6 +142,19 @@ def run_diagnostics(
             "Primary failure categories: "
             + ", ".join(f"{name}={count}" for name, count in trend["primary_failure_categories"].items())
         )
+    if trend.get("failure_category_breakdown"):
+        summary_parts: list[str] = []
+        for category, breakdown in trend["failure_category_breakdown"].items():
+            command_summary = ", ".join(
+                f"{item['label']}={item['count']}" for item in breakdown.get("failing_commands", [])
+            ) or "none"
+            terminal_summary = ", ".join(
+                f"{item['node']}={item['count']}" for item in breakdown.get("terminal_nodes", [])
+            ) or "none"
+            summary_parts.append(
+                f"{category}(runs={breakdown.get('run_count')}; commands={command_summary}; nodes={terminal_summary})"
+            )
+        print("Failure breakdown: " + "; ".join(summary_parts))
     if trend.get("top_terminal_nodes"):
         print(
             "Top terminal nodes: "

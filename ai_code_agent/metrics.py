@@ -199,6 +199,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "average_duration_ms": 0,
             "average_testing_duration_ms": 0,
             "primary_failure_categories": {},
+            "failure_category_breakdown": {},
             "slowest_commands": [],
             "top_terminal_nodes": [],
             "top_failing_commands": [],
@@ -238,6 +239,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     total_duration_ms = 0
     total_testing_duration_ms = 0
     failure_categories: dict[str, int] = {}
+    failure_category_breakdown: dict[str, dict[str, Any]] = {}
     command_stats: dict[str, dict[str, Any]] = {}
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
@@ -260,13 +262,28 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         primary_category = failures.get("primary_category")
         if isinstance(primary_category, str) and primary_category:
             failure_categories[primary_category] = failure_categories.get(primary_category, 0) + 1
+            bucket = failure_category_breakdown.get(primary_category)
+            if bucket is None:
+                bucket = {
+                    "run_count": 0,
+                    "terminal_nodes": {},
+                    "failing_commands": {},
+                }
+                failure_category_breakdown[primary_category] = bucket
+            bucket["run_count"] += 1
         if isinstance(terminal_node, str) and terminal_node:
             terminal_node_counts[terminal_node] = terminal_node_counts.get(terminal_node, 0) + 1
+            if isinstance(primary_category, str) and primary_category:
+                breakdown_terminal_nodes = failure_category_breakdown[primary_category]["terminal_nodes"]
+                breakdown_terminal_nodes[terminal_node] = breakdown_terminal_nodes.get(terminal_node, 0) + 1
         failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
         for failed_command in failed_commands:
             if not isinstance(failed_command, str) or not failed_command:
                 continue
             failing_command_counts[failed_command] = failing_command_counts.get(failed_command, 0) + 1
+            if isinstance(primary_category, str) and primary_category:
+                breakdown_failing_commands = failure_category_breakdown[primary_category]["failing_commands"]
+                breakdown_failing_commands[failed_command] = breakdown_failing_commands.get(failed_command, 0) + 1
         commands = testing.get("commands") if isinstance(testing.get("commands"), list) else []
         for command in commands:
             if not isinstance(command, dict):
@@ -402,6 +419,28 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "average_duration_ms": int(total_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "average_testing_duration_ms": int(total_testing_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "primary_failure_categories": dict(sorted(failure_categories.items())),
+        "failure_category_breakdown": {
+            category: {
+                "run_count": breakdown["run_count"],
+                "terminal_nodes": [
+                    {"node": node, "count": count}
+                    for node, count in sorted(
+                        breakdown["terminal_nodes"].items(),
+                        key=lambda item: (item[1], item[0]),
+                        reverse=True,
+                    )[:3]
+                ],
+                "failing_commands": [
+                    {"label": label, "count": count}
+                    for label, count in sorted(
+                        breakdown["failing_commands"].items(),
+                        key=lambda item: (item[1], item[0]),
+                        reverse=True,
+                    )[:3]
+                ],
+            }
+            for category, breakdown in sorted(failure_category_breakdown.items())
+        },
         "slowest_commands": sorted(
             command_stats.values(),
             key=lambda item: (item["max_duration_ms"], item["average_duration_ms"], item["count"]),
