@@ -36,8 +36,13 @@ class AgentConfig:
     
     # Integrations
     github_token: Optional[str] = field(default_factory=lambda: os.getenv("GITHUB_TOKEN"))
+    github_repo: Optional[str] = field(default_factory=lambda: os.getenv("GITHUB_REPO"))
+    github_base_branch: str = field(default_factory=lambda: os.getenv("GITHUB_BASE_BRANCH", "main"))
     azure_devops_pat: Optional[str] = field(default_factory=lambda: os.getenv("AZURE_DEVOPS_PAT"))
     azure_devops_org_url: Optional[str] = field(default_factory=lambda: os.getenv("AZURE_DEVOPS_ORG_URL"))
+    azure_devops_project: Optional[str] = field(default_factory=lambda: os.getenv("AZURE_DEVOPS_PROJECT"))
+    azure_devops_repo: Optional[str] = field(default_factory=lambda: os.getenv("AZURE_DEVOPS_REPO"))
+    azure_devops_target_branch: str = field(default_factory=lambda: os.getenv("AZURE_DEVOPS_TARGET_BRANCH", "main"))
     
     # Sandbox
     sandbox_mode: str = field(default_factory=lambda: os.getenv("SANDBOX_MODE", "docker"))

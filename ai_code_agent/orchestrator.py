@@ -10,6 +10,7 @@ except ImportError:  # pragma: no cover - optional dependency
     StateGraph = None
 
 from ai_code_agent.config import AgentConfig
+from ai_code_agent.integrations.workflow_support import build_branch_name, create_remote_pr
 from ai_code_agent.llm.client import LLMClient
 from ai_code_agent.metrics import build_execution_metrics, generate_run_id, persist_execution_metrics, utc_now_iso
 
@@ -51,6 +52,7 @@ class AgentState(TypedDict, total=False):
     codegen_summary: dict[str, Any]
     workspace_profile: dict[str, Any]
     file_edit_policy: dict[str, Any]
+    issue_context: dict[str, Any]
 
 
 def _build_runtime() -> tuple[AgentConfig, LLMClient]:
@@ -286,23 +288,36 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
     config, _ = _build_runtime()
     message = "Workflow completed without creating a PR."
     created_pr_url = None
+    branch_name = None
 
     if config.auto_commit and current_state.get("patches"):
         from ai_code_agent.tools.git_ops import GitOps
 
         git_ops = GitOps(current_state["workspace_dir"])
-        branch_name = f"ai-code-agent/{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        branch_name = build_branch_name(
+            current_state.get("issue_context") if isinstance(current_state.get("issue_context"), dict) else {},
+            current_state.get("issue_description") or datetime.utcnow().strftime('%Y%m%d%H%M%S'),
+        )
         if git_ops.create_branch(branch_name) and git_ops.commit_changes("AI Code Agent automated update"):
             message = f"Committed changes on branch {branch_name}."
             if config.auto_push and git_ops.push_branch(branch_name):
-                message = f"Committed and pushed changes on branch {branch_name}."
+                created_pr_url, message = create_remote_pr(current_state, config, branch_name=branch_name)
         else:
             message = "Workflow completed, but automatic git commit failed."
 
     result = {
         "created_pr_url": created_pr_url,
         "execution_log": _merge_logs(current_state, message),
-        "execution_events": _append_event(_event_state(current_state, {"created_pr_url": created_pr_url}), "create_pr", "completed", {"created_pr_url": created_pr_url}),
+        "execution_events": _append_event(
+            _event_state(current_state, {"created_pr_url": created_pr_url}),
+            "create_pr",
+            "completed",
+            {
+                "created_pr_url": created_pr_url,
+                "branch_name": branch_name,
+                "issue_provider": (current_state.get("issue_context") or {}).get("provider") if isinstance(current_state.get("issue_context"), dict) else None,
+            },
+        ),
         "error_message": current_state.get("error_message"),
     }
     result = _with_run_identity(current_state, result)

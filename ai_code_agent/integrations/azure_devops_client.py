@@ -1,6 +1,6 @@
 import base64
 import json
-from urllib import parse, request
+from urllib import request
 
 class AzureDevOpsClient:
     """Wrapper for ADO to interact with Work Items and PRs."""
@@ -26,6 +26,26 @@ class AzureDevOpsClient:
         """Fetch ADO work item details."""
         base_url = f"{self.org_url}/{project}/_apis/wit/workitems/{temp_id}?api-version=7.1"
         return self._request("GET", base_url)
+
+    def list_work_item_comments(self, project: str, work_item_id: int) -> list[dict]:
+        """Fetch work item comments."""
+        base_url = f"{self.org_url}/{project}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.4"
+        data = self._request("GET", base_url)
+        raw_comments = data.get("comments") if isinstance(data.get("comments"), list) else data.get("value")
+        if not isinstance(raw_comments, list):
+            return []
+        results: list[dict] = []
+        for item in raw_comments:
+            if not isinstance(item, dict):
+                continue
+            created_by = item.get("createdBy") if isinstance(item.get("createdBy"), dict) else {}
+            results.append({"author": created_by.get("displayName") or "unknown", "text": item.get("text") or ""})
+        return results
+
+    def post_work_item_comment(self, project: str, work_item_id: int, comment: str) -> dict:
+        """Add a comment to a work item."""
+        base_url = f"{self.org_url}/{project}/_apis/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.4"
+        return self._request("POST", base_url, {"text": comment})
         
     def create_pull_request(self, project: str, repo: str, source_ref: str, target_ref: str, title: str, description: str) -> str:
         """Create a PR in Azure Repos."""

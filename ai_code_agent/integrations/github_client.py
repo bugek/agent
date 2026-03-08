@@ -23,13 +23,26 @@ class GitHubClient:
     def get_issue(self, repo: str, issue_number: int) -> dict:
         """Fetch issue details including description and comments."""
         return self._request("GET", f"https://api.github.com/repos/{repo}/issues/{issue_number}")
+
+    def list_issue_comments(self, repo: str, issue_number: int) -> list[dict]:
+        """Fetch issue comments in ascending order."""
+        data = self._request("GET", f"https://api.github.com/repos/{repo}/issues/{issue_number}/comments")
+        if not isinstance(data, list):
+            return []
+        results: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            user = item.get("user") if isinstance(item.get("user"), dict) else {}
+            results.append({"author": user.get("login") or "unknown", "body": item.get("body") or ""})
+        return results
         
-    def create_pull_request(self, repo: str, branch: str, title: str, body: str) -> str:
+    def create_pull_request(self, repo: str, branch: str, title: str, body: str, base_branch: str = "main") -> str:
         """Create a PR and return its URL."""
         data = self._request(
             "POST",
             f"https://api.github.com/repos/{repo}/pulls",
-            {"title": title, "body": body, "head": branch, "base": "main"},
+            {"title": title, "body": body, "head": branch, "base": base_branch},
         )
         return data.get("html_url", "")
         

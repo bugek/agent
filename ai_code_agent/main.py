@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 from ai_code_agent.config import AgentConfig
+from ai_code_agent.integrations.workflow_support import resolve_issue_input
 from ai_code_agent.llm.client import LLMClient
 from ai_code_agent.metrics import (
     build_diagnostics_summary,
@@ -554,6 +555,8 @@ def cli(argv: list[str] | None = None):
             output_format,
         )
 
+    resolved_issue_description, issue_context = resolve_issue_input(args.issue, config)
+
     print(f"Starting AI Agent for issue: {args.issue}")
 
     # Initialize the LLM client
@@ -565,7 +568,8 @@ def cli(argv: list[str] | None = None):
 
     # Define initial state
     initial_state: AgentState = {
-        "issue_description": args.issue,
+        "issue_description": resolved_issue_description,
+        "issue_context": issue_context,
         "workspace_dir": args.repo or config.workspace_dir,
         "run_id": generate_run_id(),
         "workflow_started_at": utc_now_iso(),

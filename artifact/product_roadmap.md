@@ -95,6 +95,7 @@ Current progress:
 2. Policy-based edit restrictions, structured review summaries, audit trails, and persisted execution metrics are already in place.
 3. Retry orchestration now includes remediation-aware `targeted_retry`, historical strategy selection between `targeted_retry` and `full`, and an early-stop path after a failed full fallback.
 4. GitHub Actions validation now publishes `.ai-code-agent` artifacts so teams can inspect validation logs, run metrics, and diagnostics snapshots from CI runs.
+5. GitHub issue and Azure DevOps work item inputs can now enrich the planning prompt, and successful auto-push runs can publish provider-specific PRs plus source-thread comments.
 
 ## 12-Month Direction
 
@@ -136,7 +137,7 @@ Current progress:
 ลำดับที่ควรทำต่อจากจุดนี้:
 
 1. CI integration that publishes validation and diagnostics artifacts on every push/PR
-2. Deeper GitHub and Azure DevOps issue, branch, and PR workflow support
-3. Better sandbox backends, especially remote or production-like execution options
-4. Richer retry-policy tuning from larger history windows and operator feedback
-5. Operator-facing failure taxonomy and dashboard-oriented diagnostics
+2. Better sandbox backends, especially remote or production-like execution options
+3. Richer retry-policy tuning from larger history windows and operator feedback
+4. Operator-facing failure taxonomy and dashboard-oriented diagnostics
+5. Richer GitHub and Azure DevOps branch policies, linking, and PR metadata

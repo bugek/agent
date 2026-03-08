@@ -15,11 +15,11 @@ Current status:
 3. Next.js and NestJS workflows are supported with committed smoke fixtures and full validation coverage.
 4. Retrieval is hybrid and explainable through candidate reasons, explanation edges, graph seed files, and structured `edit_intent`.
 5. Review-driven remediation, tester `targeted_retry`, adaptive retry-policy selection from recent run history, and retry-effectiveness diagnostics are implemented and validated.
-6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, and retry recovery reporting.
+6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, retry recovery reporting, and provider-aware issue/PR workflow publishing.
 
 Future:
 
-- Deeper GitHub and Azure DevOps issue, branch, and PR workflow support.
+- Further GitHub and Azure DevOps workflow support, including richer branch policies, linking, and PR metadata.
 - Better sandbox backends, including stronger remote or production-like execution options.
 - Further retry orchestration tuning based on larger historical windows, operator feedback, and richer stop/continue policies.
 - Higher-level operator diagnostics such as dashboard-oriented summaries and richer failure comparisons.
@@ -37,7 +37,7 @@ We use a Multi-Agent architecture orchestrated via a State Machine. When `langgr
 4. The coder applies deterministic framework-aware scaffolding when possible, then falls back to LLM-guided edits and can consume planner `edit_intent` plus reviewer remediation context on retry loops.
 5. The tester runs repository-appropriate validation, using Docker when available or local execution as fallback, and can switch between full validation and targeted retry validation based on prior failure signals while recording skipped-command and command-reduction effectiveness data.
 6. The reviewer combines changed files, validation signals, and generated summaries to decide whether the run is acceptable, and now emits structured remediation guidance when another coding pass is required.
-7. If approved, the workflow can proceed to git operations and PR creation.
+7. If approved, the workflow can proceed to git operations and PR creation, including remote GitHub issue enrichment, Azure DevOps work-item enrichment, and provider-aware PR publishing when credentials are configured.
 
 ```mermaid
 flowchart LR
@@ -148,6 +148,8 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 - The tester can switch to a `targeted_retry` validation strategy on remediation loops, using prior failed validation labels, failed commands, and visual-review blockers to reduce rerun cost while preserving relevant checks.
 - The tester can also consult recent `execution_metrics` history on retry attempts to choose between `targeted_retry` and `full`, and can tell the orchestrator to stop after a failed full fallback when another loop is unlikely to help.
 - The execution metrics layer now captures remediation effectiveness signals such as retry recovery, remediation-assisted recovery, edit-intent-assisted recovery, skipped-command totals, and command reduction rates for targeted retries.
+- GitHub issue URLs passed to `ai-code-agent run --issue ...` can now be resolved into issue title/body/recent comments, and successful auto-push runs can open a GitHub PR plus comment back on the source issue when `GITHUB_TOKEN` and repo settings are present.
+- Azure DevOps work item URLs passed to `ai-code-agent run --issue ...` can now be resolved into work item title/description/recent comments, and successful auto-push runs can open an Azure Repos PR plus comment back on the source work item when ADO credentials and repo settings are present.
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
 - The planner and coder now share remediation-aware `edit_intent` metadata so retry loops can stay focused on the files, reasons, and validation targets that failed in the previous attempt.
 - The Next.js deterministic scaffold path has started a frontend quality layer with design-direction-aware templates, App Router `loading.tsx` and `error.tsx` generation, and built-in loading/empty/error/success state coverage for generated components.

@@ -248,6 +248,39 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
 
         self.assertEqual(route, "fail")
 
+    def test_create_pr_node_records_branch_and_remote_url(self) -> None:
+        with patch("ai_code_agent.orchestrator._build_runtime") as mock_runtime, patch(
+            "ai_code_agent.tools.git_ops.GitOps"
+        ) as mock_git_ops, patch("ai_code_agent.orchestrator.create_remote_pr") as mock_create_remote_pr:
+            mock_runtime.return_value = (
+                type("Config", (), {"auto_commit": True, "auto_push": True})(),
+                object(),
+            )
+            mock_git_ops.return_value.create_branch.return_value = True
+            mock_git_ops.return_value.commit_changes.return_value = True
+            mock_git_ops.return_value.push_branch.return_value = True
+            mock_create_remote_pr.return_value = (
+                "https://github.com/octo/repo/pull/9",
+                "Committed, pushed, and opened GitHub PR: https://github.com/octo/repo/pull/9",
+            )
+
+            result = orchestrator.create_pr_node(
+                {
+                    "workspace_dir": ".",
+                    "issue_description": "Fix flaky validation",
+                    "issue_context": {"provider": "github", "issue_number": 42, "title": "Fix flaky validation"},
+                    "patches": [{"file": "docs/readme.md"}],
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                }
+            )
+
+        event = result["execution_events"][-1]
+        self.assertEqual(result["created_pr_url"], "https://github.com/octo/repo/pull/9")
+        self.assertEqual(event["details"]["created_pr_url"], "https://github.com/octo/repo/pull/9")
+        self.assertEqual(event["details"]["issue_provider"], "github")
+        self.assertIn("ai-code-agent/gh-42-fix-flaky-validation", event["details"]["branch_name"])
+
 
 if __name__ == "__main__":
     unittest.main()
