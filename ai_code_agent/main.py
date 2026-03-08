@@ -245,6 +245,17 @@ def _print_summary_text_output(
             f"avg_skipped={effectiveness.get('targeted_retry_average_skipped_commands', 0)}, "
             f"avg_reduction_rate={effectiveness.get('targeted_retry_average_reduction_rate', 0.0):.2f}"
         )
+    strategy_comparison = trend.get("strategy_comparison") if isinstance(trend.get("strategy_comparison"), dict) else {}
+    if strategy_comparison:
+        full_summary = strategy_comparison.get("full") if isinstance(strategy_comparison.get("full"), dict) else {}
+        targeted_summary = strategy_comparison.get("targeted_retry") if isinstance(strategy_comparison.get("targeted_retry"), dict) else {}
+        delta_summary = strategy_comparison.get("targeted_retry_vs_full") if isinstance(strategy_comparison.get("targeted_retry_vs_full"), dict) else {}
+        print(
+            "Strategy comparison: "
+            f"full(runs={full_summary.get('run_count', 0)}, success_rate={full_summary.get('success_rate', 0.0):.2f}, avg_testing_ms={full_summary.get('average_testing_duration_ms', 0)}) ; "
+            f"targeted_retry(runs={targeted_summary.get('run_count', 0)}, success_rate={targeted_summary.get('success_rate', 0.0):.2f}, avg_testing_ms={targeted_summary.get('average_testing_duration_ms', 0)}) ; "
+            f"delta(success_rate={delta_summary.get('success_rate_delta', 0.0):.2f}, testing_ms={delta_summary.get('testing_duration_ms_delta', 0)}, reduction_rate={delta_summary.get('average_command_reduction_rate_delta', 0.0):.2f})"
+        )
     if trend["primary_failure_categories"]:
         print(
             "Primary failure categories: "

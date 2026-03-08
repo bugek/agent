@@ -140,11 +140,13 @@ Exit Criteria:
 เป้าหมาย: ใช้งานในทีมได้ดีขึ้น
 
 Current progress:
-1. Started
-2. AgentConfig now supports policy-based file restrictions through allow/deny glob rules, and coder enforcement records blocked operations in `codegen_summary`.
+1. Complete
+2. AgentConfig supports policy-based file restrictions through allow/deny glob rules, and coder enforcement records blocked operations in `codegen_summary`.
 3. Planner filters denied `files_to_edit` targets before they reach coding, which reduces accidental edits outside the team-approved scope.
-4. Reviewer now emits structured review summaries covering changed areas, validation outcomes, visual-review status, and residual risks.
-5. `execution_events` now retain planner, coder, and reviewer decision metadata so runs can be audited without replaying the whole workflow.
+4. Reviewer emits structured review summaries covering changed areas, validation outcomes, visual-review status, residual risks, and remediation guidance.
+5. Planner, coder, and tester now coordinate retry loops through remediation-aware `edit_intent` plus `targeted_retry` validation selection.
+6. `execution_events` retain planner, coder, tester, and reviewer decision metadata so runs can be audited without replaying the whole workflow.
+7. Diagnose output and persisted metrics now summarize retry recovery, remediation effectiveness, edit-intent recovery, and targeted-retry command savings for operators.
 
 Features:
 1. Approval gates
@@ -152,10 +154,13 @@ Features:
 3. Richer review summaries
 4. GitHub/ADO issue and PR workflows ที่ลึกขึ้น
 5. Audit trail for agent decisions
+6. Remediation-aware retry coordination
+7. Operator-facing retry effectiveness metrics
 
 Exit Criteria:
 1. ทีม review งานจาก agent ได้ง่ายขึ้น
 2. ควบคุม risk ของ auto-changes ได้ดีขึ้น
+3. retry behavior อธิบายและวัดผลย้อนหลังได้จาก diagnostics
 
 ## v0.9.0 Production Readiness
 

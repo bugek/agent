@@ -319,6 +319,34 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 "targeted_retry_average_skipped_commands": 0,
                 "targeted_retry_average_reduction_rate": 0.0,
             },
+            "strategy_comparison": {
+                "full": {
+                    "run_count": 0,
+                    "approved_count": 0,
+                    "success_rate": 0.0,
+                    "average_duration_ms": 0,
+                    "average_testing_duration_ms": 0,
+                    "average_skipped_command_count": 0,
+                    "average_command_reduction_rate": 0.0,
+                },
+                "targeted_retry": {
+                    "run_count": 0,
+                    "approved_count": 0,
+                    "success_rate": 0.0,
+                    "average_duration_ms": 0,
+                    "average_testing_duration_ms": 0,
+                    "average_skipped_command_count": 0,
+                    "average_command_reduction_rate": 0.0,
+                },
+                "targeted_retry_vs_full": {
+                    "run_count_delta": 0,
+                    "success_rate_delta": 0.0,
+                    "duration_ms_delta": 0,
+                    "testing_duration_ms_delta": 0,
+                    "average_skipped_command_count_delta": 0,
+                    "average_command_reduction_rate_delta": 0.0,
+                },
+            },
             "failure_category_breakdown": {},
             "slowest_commands": [],
             "top_terminal_nodes": [],
@@ -364,6 +392,24 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
     validation_strategy_counts: dict[str, int] = {}
+    strategy_stats: dict[str, dict[str, float | int]] = {
+        "full": {
+            "run_count": 0,
+            "approved_count": 0,
+            "total_duration_ms": 0,
+            "total_testing_duration_ms": 0,
+            "total_skipped_command_count": 0,
+            "total_command_reduction_rate": 0.0,
+        },
+        "targeted_retry": {
+            "run_count": 0,
+            "approved_count": 0,
+            "total_duration_ms": 0,
+            "total_testing_duration_ms": 0,
+            "total_skipped_command_count": 0,
+            "total_command_reduction_rate": 0.0,
+        },
+    }
     retry_runs = 0
     retry_recovered_runs = 0
     remediation_runs = 0
@@ -416,6 +462,15 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         validation_strategy = testing.get("validation_strategy")
         if isinstance(validation_strategy, str) and validation_strategy:
             validation_strategy_counts[validation_strategy] = validation_strategy_counts.get(validation_strategy, 0) + 1
+        normalized_strategy = validation_strategy if validation_strategy == "targeted_retry" else "full"
+        strategy_bucket = strategy_stats[normalized_strategy]
+        strategy_bucket["run_count"] += 1
+        strategy_bucket["total_duration_ms"] += _as_int(workflow.get("duration_ms"))
+        strategy_bucket["total_testing_duration_ms"] += _as_int(testing.get("total_duration_ms"))
+        strategy_bucket["total_skipped_command_count"] += _as_int(testing.get("skipped_command_count"))
+        strategy_bucket["total_command_reduction_rate"] += _as_float(testing.get("command_reduction_rate"))
+        if status == "approved":
+            strategy_bucket["approved_count"] += 1
         if attempt_count > 1:
             retry_runs += 1
             if status == "approved":
@@ -566,6 +621,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         if immediate_previous_metrics is not None
         else None
     )
+    strategy_comparison = _strategy_comparison_summary(strategy_stats)
     return {
         "run_count": run_count,
         "comparable_run_count": comparable_run_count,
@@ -594,6 +650,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "targeted_retry_average_skipped_commands": int(targeted_retry_total_skipped_commands / targeted_retry_runs) if targeted_retry_runs else 0,
             "targeted_retry_average_reduction_rate": round(targeted_retry_total_reduction_rate / targeted_retry_runs, 2) if targeted_retry_runs else 0.0,
         },
+        "strategy_comparison": strategy_comparison,
         "failure_category_breakdown": {
             category: {
                 "run_count": breakdown["run_count"],
@@ -867,6 +924,44 @@ def _testing_command_summaries(testing_summary: dict[str, Any]) -> list[dict[str
             }
         )
     return summaries
+
+
+def _strategy_comparison_summary(strategy_stats: dict[str, dict[str, float | int]]) -> dict[str, Any]:
+    full_summary = _strategy_bucket_summary(strategy_stats.get("full", {}))
+    targeted_summary = _strategy_bucket_summary(strategy_stats.get("targeted_retry", {}))
+    return {
+        "full": full_summary,
+        "targeted_retry": targeted_summary,
+        "targeted_retry_vs_full": {
+            "run_count_delta": targeted_summary["run_count"] - full_summary["run_count"],
+            "success_rate_delta": round(targeted_summary["success_rate"] - full_summary["success_rate"], 2),
+            "duration_ms_delta": targeted_summary["average_duration_ms"] - full_summary["average_duration_ms"],
+            "testing_duration_ms_delta": targeted_summary["average_testing_duration_ms"] - full_summary["average_testing_duration_ms"],
+            "average_skipped_command_count_delta": targeted_summary["average_skipped_command_count"] - full_summary["average_skipped_command_count"],
+            "average_command_reduction_rate_delta": round(
+                targeted_summary["average_command_reduction_rate"] - full_summary["average_command_reduction_rate"],
+                2,
+            ),
+        },
+    }
+
+
+def _strategy_bucket_summary(bucket: dict[str, float | int]) -> dict[str, Any]:
+    run_count = _as_int(bucket.get("run_count"))
+    approved_count = _as_int(bucket.get("approved_count"))
+    total_duration_ms = _as_int(bucket.get("total_duration_ms"))
+    total_testing_duration_ms = _as_int(bucket.get("total_testing_duration_ms"))
+    total_skipped_command_count = _as_int(bucket.get("total_skipped_command_count"))
+    total_command_reduction_rate = _as_float(bucket.get("total_command_reduction_rate"))
+    return {
+        "run_count": run_count,
+        "approved_count": approved_count,
+        "success_rate": round(approved_count / run_count, 2) if run_count else 0.0,
+        "average_duration_ms": int(total_duration_ms / run_count) if run_count else 0,
+        "average_testing_duration_ms": int(total_testing_duration_ms / run_count) if run_count else 0,
+        "average_skipped_command_count": int(total_skipped_command_count / run_count) if run_count else 0,
+        "average_command_reduction_rate": round(total_command_reduction_rate / run_count, 2) if run_count else 0.0,
+    }
 
 
 def _command_reduction_rate(testing_summary: dict[str, Any]) -> float:

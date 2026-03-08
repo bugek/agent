@@ -66,7 +66,8 @@ The repository can implement this incrementally by first deriving `execution_met
     "candidate_file_count": 12,
     "graph_seed_file_count": 4,
     "blocked_file_count": 1,
-    "files_to_edit_count": 3
+    "files_to_edit_count": 3,
+    "edit_intent_count": 2
   },
   "coding": {
     "generated_by": "llm",
@@ -75,7 +76,9 @@ The repository can implement this incrementally by first deriving `execution_met
     "failed_operation_count": 1,
     "blocked_operation_count": 1,
     "patch_count": 4,
-    "changed_file_count": 3
+    "changed_file_count": 3,
+    "remediation_applied": true,
+    "remediation_focus_count": 2
   },
   "testing": {
     "status": "failed",
@@ -84,6 +87,11 @@ The repository can implement this incrementally by first deriving `execution_met
     "failed_commands": ["script:build"],
     "lint_issue_count": 0,
     "total_duration_ms": 48100,
+    "validation_strategy": "targeted_retry",
+    "selected_command_count": 1,
+    "skipped_command_count": 2,
+    "requested_retry_labels": ["script:build"],
+    "command_reduction_rate": 0.67,
     "slowest_command": {
       "label": "script:build",
       "duration_ms": 38000,
@@ -120,7 +128,19 @@ The repository can implement this incrementally by first deriving `execution_met
     "comment_count": 3,
     "residual_risk_count": 3,
     "changed_area_count": 2,
-    "validation_failed_count": 1
+    "validation_failed_count": 1,
+    "remediation_required": true
+  },
+  "effectiveness": {
+    "retry_attempted": true,
+    "retry_recovered": false,
+    "remediation_applied": true,
+    "remediation_recovered": false,
+    "edit_intent_used": true,
+    "edit_intent_recovered": false,
+    "targeted_retry_used": true,
+    "command_reduction_count": 2,
+    "command_reduction_rate": 0.67
   },
   "failures": {
     "has_failure": true,
@@ -207,6 +227,7 @@ The repository can implement this incrementally by first deriving `execution_met
 - `planning.graph_seed_file_count`: count of `planning_context.graph_seed_files`.
 - `planning.blocked_file_count`: count of `planning_context.blocked_files_to_edit`.
 - `planning.files_to_edit_count`: count of final `files_to_edit`.
+- `planning.edit_intent_count`: count of structured remediation-aware edit targets carried into coding.
 
 ### Coding
 
@@ -217,6 +238,8 @@ The repository can implement this incrementally by first deriving `execution_met
 - `coding.blocked_operation_count`: length of `codegen_summary.blocked_operations`.
 - `coding.patch_count`: length of `patches`.
 - `coding.changed_file_count`: distinct patch file count.
+- `coding.remediation_applied`: whether coder executed with remediation context on this run.
+- `coding.remediation_focus_count`: number of remediation focus areas passed into coding.
 
 ### Testing
 
@@ -226,6 +249,11 @@ The repository can implement this incrementally by first deriving `execution_met
 - `testing.failed_commands`: labels whose exit code is non-zero.
 - `testing.lint_issue_count`: parsed from `lint:` section when practical, else optional.
 - `testing.total_duration_ms`: summed duration across validation commands.
+- `testing.validation_strategy`: `full` or `targeted_retry`.
+- `testing.selected_command_count`: count of commands kept for the current validation pass.
+- `testing.skipped_command_count`: count of commands omitted on a targeted retry pass.
+- `testing.requested_retry_labels`: labels requested by remediation-aware retry selection.
+- `testing.command_reduction_rate`: skipped commands divided by selected plus skipped commands.
 - `testing.slowest_command`: label and timing for the slowest validation command.
 - `testing.commands`: per-command summary entries with label, exit code, duration, backend mode, and timeout flag.
 - `testing.visual_review`: nested summary only when frontend visual review is enabled.
@@ -246,6 +274,19 @@ The repository can implement this incrementally by first deriving `execution_met
 - `review.residual_risk_count`: length of `review_summary.residual_risks`.
 - `review.changed_area_count`: length of `review_summary.changed_areas`.
 - `review.validation_failed_count`: length of `review_summary.validation.failed`.
+- `review.remediation_required`: whether reviewer requested another remediation-guided coding loop.
+
+### Effectiveness
+
+- `effectiveness.retry_attempted`: true when the run reached a retry loop.
+- `effectiveness.retry_recovered`: true when a retried run eventually finished approved.
+- `effectiveness.remediation_applied`: true when coder consumed remediation context.
+- `effectiveness.remediation_recovered`: true when remediation-backed coding ended approved.
+- `effectiveness.edit_intent_used`: true when planner emitted focused `edit_intent` guidance.
+- `effectiveness.edit_intent_recovered`: true when an `edit_intent`-guided run ended approved.
+- `effectiveness.targeted_retry_used`: true when tester selected `targeted_retry`.
+- `effectiveness.command_reduction_count`: number of skipped commands on the selected retry pass.
+- `effectiveness.command_reduction_rate`: skipped-command ratio for the selected retry pass.
 
 ### Failures
 
@@ -304,6 +345,7 @@ Current implementation status:
 3. `review` events now emit `approved` or `changes_required` status.
 4. `node_started` events are now emitted before each node executes.
 5. `node_completed` durations are now measured against the matching `node_started` event for the same node attempt.
+6. planner/tester/reviewer event details now include retry-loop metadata such as `edit_intent_count`, validation strategy selection, skipped-command counts, and retry recovery flags.
 
 ## Derivation Rules From Current State
 
@@ -320,6 +362,8 @@ The first implementation should avoid invasive agent rewrites.
 - `test_passed`: top-level test outcome
 - `visual_review`: artifact and responsive-review coverage
 - `review_comments`, `review_summary`, `review_approved`: review outcome and residual risk summary
+- `testing_summary`: validation strategy, command selection, and duration metadata
+- `codegen_summary`: remediation usage and blocked/failed operation counts
 
 ### Derive In v1
 
@@ -328,6 +372,7 @@ The first implementation should avoid invasive agent rewrites.
 - phase timing from first and last occurrence per node
 - testing command counts from `test_results`
 - failure categories from `test_passed`, `review_summary`, `error_message`, and policy block counts
+- retry effectiveness and command reduction from `retry_count`, `planning_context.edit_intent`, `codegen_summary`, and `testing_summary`
 
 ### Add Later When Needed
 
@@ -336,6 +381,7 @@ The first implementation should avoid invasive agent rewrites.
 - git timings and PR creation metadata
 - per-command execution durations from tester
 - explicit planner candidate counts emitted directly instead of inferred
+- cross-run strategy comparison summaries for operator dashboards
 
 ## Failure Taxonomy
 
