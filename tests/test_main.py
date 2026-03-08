@@ -133,6 +133,7 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
+            self.assertIn("Diagnostics summary artifact: .ai-code-agent/diagnostics/diagnose-recent-3.json", rendered)
             self.assertIn("Recent runs analyzed: 3", rendered)
             self.assertIn("Comparable runs: 3", rendered)
             self.assertIn("Approved runs: 2", rendered)
@@ -220,6 +221,7 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["latest"]["run_id"], "run-3")
+            self.assertEqual(payload["summary_path"], ".ai-code-agent/diagnostics/diagnose-recent-3.json")
             self.assertEqual(len(payload["recent_runs"]), 3)
             self.assertEqual(payload["trend"]["run_count"], 3)
             self.assertEqual(payload["trend"]["comparable_run_count"], 3)
@@ -399,6 +401,7 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["filters"], {"status": "failed", "failure_category": "validation"})
+            self.assertEqual(payload["summary_path"], ".ai-code-agent/diagnostics/diagnose-recent-3-status-failed-failure-validation.json")
             self.assertEqual(payload["latest"]["run_id"], "run-2")
             self.assertEqual(len(payload["recent_runs"]), 1)
             self.assertEqual(payload["trend"]["run_count"], 1)
@@ -427,6 +430,9 @@ class MainCliTest(unittest.TestCase):
                     "validation",
                     "text",
                 )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("matching status=failed failure_category=validation", output.getvalue())
 
     def test_run_diagnostics_supports_rows_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -4,10 +4,12 @@ import sys
 from ai_code_agent.config import AgentConfig
 from ai_code_agent.llm.client import LLMClient
 from ai_code_agent.metrics import (
+    build_diagnostics_summary,
     build_execution_metrics_trend,
     generate_run_id,
     list_execution_metrics_artifacts,
     load_execution_metrics_artifact,
+    persist_diagnostics_summary,
     utc_now_iso,
 )
 from ai_code_agent.orchestrator import build_graph, AgentState
@@ -107,6 +109,18 @@ def run_diagnostics(
 
     latest_metrics, latest_path = metrics_entries[0]
     trend = build_execution_metrics_trend(metrics_entries)
+    summary_path = persist_diagnostics_summary(
+        workspace_dir,
+        build_diagnostics_summary(
+            metrics_entries,
+            trend,
+            recent=recent,
+            filters={"status": status, "failure_category": failure_category},
+        ),
+        recent=recent,
+        status=status,
+        failure_category=failure_category,
+    )
     if output_format != "text":
         _print_export_output(
             latest_metrics=latest_metrics,
@@ -115,6 +129,7 @@ def run_diagnostics(
             trend=trend,
             output_format=output_format,
             filters={"status": status, "failure_category": failure_category},
+            summary_path=summary_path,
             single_run=False,
         )
         return 0
@@ -132,6 +147,8 @@ def run_diagnostics(
                 if part
             )
         )
+    if summary_path:
+        print(f"Diagnostics summary artifact: {summary_path}")
     print(f"Recent runs analyzed: {trend['run_count']}")
     print(f"Comparable runs: {trend['comparable_run_count']}")
     print(f"Approved runs: {trend['approved_count']}")
@@ -285,11 +302,13 @@ def _print_export_output(
     trend: dict,
     output_format: str,
     filters: dict[str, str | None],
+    summary_path: str | None = None,
     single_run: bool,
 ) -> None:
     payload = {
         "latest": latest_metrics,
         "latest_path": latest_path,
+        "summary_path": summary_path,
         "filters": filters,
         "recent_runs": [
             {"metrics": metrics, "path": path} for metrics, path in metrics_entries

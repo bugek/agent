@@ -12,6 +12,8 @@ ISO_SUFFIX = "Z"
 PHASE_ORDER = ["plan", "code", "test", "review", "create_pr"]
 EXECUTION_RUNS_ROOT = Path(".ai-code-agent") / "runs"
 EXECUTION_METRICS_FILE = "metrics.json"
+DIAGNOSTICS_ROOT = Path(".ai-code-agent") / "diagnostics"
+DIAGNOSTICS_SUMMARY_PREFIX = "diagnose"
 
 
 def utc_now_iso() -> str:
@@ -129,6 +131,50 @@ def persist_execution_metrics(workspace_dir: str | None, run_id: str | None, met
     temporary_path.write_text(payload, encoding="utf-8")
     temporary_path.replace(metrics_path)
     return _relative_workspace_path(workspace_dir, metrics_path)
+
+
+def build_diagnostics_summary(
+    metrics_entries: list[tuple[dict[str, Any], str]],
+    trend: dict[str, Any],
+    *,
+    recent: int,
+    filters: dict[str, str | None],
+) -> dict[str, Any]:
+    latest_metrics = metrics_entries[0][0] if metrics_entries else {}
+    latest_path = metrics_entries[0][1] if metrics_entries else None
+    rows = [_diagnostics_summary_row(metrics, path) for metrics, path in metrics_entries]
+    return {
+        "schema_version": "diagnostics-summary/v1",
+        "generated_at": utc_now_iso(),
+        "recent": max(1, recent),
+        "filters": filters,
+        "latest_run_id": latest_metrics.get("run_id") if isinstance(latest_metrics, dict) else None,
+        "latest_path": latest_path,
+        "trend": trend,
+        "rows": rows,
+    }
+
+
+def persist_diagnostics_summary(
+    workspace_dir: str | None,
+    summary: dict[str, Any],
+    *,
+    recent: int,
+    status: str | None,
+    failure_category: str | None,
+) -> str | None:
+    if not workspace_dir or not isinstance(summary, dict) or not summary:
+        return None
+
+    diagnostics_dir = Path(workspace_dir) / DIAGNOSTICS_ROOT
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    summary_name = _diagnostics_summary_name(recent, status, failure_category)
+    summary_path = diagnostics_dir / summary_name
+    temporary_path = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    payload = json.dumps(summary, indent=2, ensure_ascii=True) + "\n"
+    temporary_path.write_text(payload, encoding="utf-8")
+    temporary_path.replace(summary_path)
+    return _relative_workspace_path(workspace_dir, summary_path)
 
 
 def load_execution_metrics_artifact(
@@ -513,6 +559,35 @@ def _delta_direction(delta: int | None, *, lower_is_better: bool) -> str | None:
     if lower_is_better:
         return "improved" if delta < 0 else "regressed"
     return "improved" if delta > 0 else "regressed"
+
+
+def _diagnostics_summary_name(recent: int, status: str | None, failure_category: str | None) -> str:
+    parts = [DIAGNOSTICS_SUMMARY_PREFIX, f"recent-{max(1, recent)}"]
+    if status:
+        parts.append(f"status-{_slug_token(status)}")
+    if failure_category:
+        parts.append(f"failure-{_slug_token(failure_category)}")
+    return "-".join(parts) + ".json"
+
+
+def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, Any]:
+    workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    return {
+        "run_id": metrics.get("run_id") or "",
+        "status": workflow.get("status") or "",
+        "primary_failure": failures.get("primary_category") or "",
+        "duration_ms": workflow.get("duration_ms") or 0,
+        "testing_duration_ms": testing.get("total_duration_ms") or 0,
+        "terminal_node": workflow.get("terminal_node") or "",
+        "path": path,
+    }
+
+
+def _slug_token(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return normalized or "all"
 
 
 def _phase_metrics(execution_events: list[dict[str, Any]], started_at: str, state: dict[str, Any]) -> dict[str, dict[str, Any]]:

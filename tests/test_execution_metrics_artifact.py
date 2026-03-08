@@ -8,7 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ai_code_agent import orchestrator
-from ai_code_agent.metrics import load_execution_metrics_artifact, persist_execution_metrics
+from ai_code_agent.metrics import (
+    build_diagnostics_summary,
+    load_execution_metrics_artifact,
+    persist_diagnostics_summary,
+    persist_execution_metrics,
+)
 
 
 class ExecutionMetricsArtifactTest(unittest.TestCase):
@@ -79,6 +84,37 @@ class ExecutionMetricsArtifactTest(unittest.TestCase):
 
             self.assertEqual(loaded_metrics, metrics)
             self.assertEqual(loaded_path, expected_path)
+
+    def test_persist_diagnostics_summary_writes_named_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "failed", "duration_ms": 100, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"total_duration_ms": 70},
+            }
+            summary = build_diagnostics_summary(
+                [(metrics, ".ai-code-agent/runs/run-1/metrics.json")],
+                {"run_count": 1},
+                recent=5,
+                filters={"status": "failed", "failure_category": "validation"},
+            )
+
+            relative_path = persist_diagnostics_summary(
+                temp_dir,
+                summary,
+                recent=5,
+                status="failed",
+                failure_category="validation",
+            )
+
+            self.assertEqual(relative_path, ".ai-code-agent/diagnostics/diagnose-recent-5-status-failed-failure-validation.json")
+            artifact_path = Path(temp_dir) / relative_path
+            self.assertTrue(artifact_path.exists())
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], "diagnostics-summary/v1")
+            self.assertEqual(payload["latest_run_id"], "run-1")
 
 
 if __name__ == "__main__":
