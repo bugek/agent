@@ -54,6 +54,7 @@ class CoderAgent(BaseAgent):
             "issue": state["issue_description"],
             "plan": state.get("plan"),
             "workspace_profile": workspace_profile,
+            "design_brief": self._frontend_design_brief(state),
             "files": file_context,
             "schema": {
                 "operations": [
@@ -184,6 +185,7 @@ class CoderAgent(BaseAgent):
 
         issue = state["issue_description"]
         lower_issue = issue.lower()
+        design_brief = self._frontend_design_brief(state)
         if not re.search(r"\b(next|page|layout|component|api|route|handler|hero|card|form|modal|section|dashboard|screen|view)\b", lower_issue):
             return []
 
@@ -204,7 +206,7 @@ class CoderAgent(BaseAgent):
                 self._file_operation(
                     editor,
                     component_file,
-                    self._next_component_template(component_request or "Feature Section", issue, route_slug),
+                    self._next_component_template(component_request or "Feature Section", issue, route_slug, design_brief),
                     preferred_action=action,
                 )
             )
@@ -216,14 +218,14 @@ class CoderAgent(BaseAgent):
                     self._file_operation(
                         editor,
                         page_file,
-                        self._next_page_template(page_file, route_slug, component_file, component_request, issue),
+                        self._next_page_template(page_file, route_slug, component_file, component_request, issue, design_brief),
                         preferred_action=action,
                     )
                 )
                 if nextjs_profile.get("router_type") == "app":
                     for special_file, template in [
-                        (self._resolve_next_special_file(nextjs_profile, route_slug, "loading.tsx"), self._next_loading_template(issue, route_slug)),
-                        (self._resolve_next_special_file(nextjs_profile, route_slug, "error.tsx"), self._next_error_template(issue, route_slug)),
+                        (self._resolve_next_special_file(nextjs_profile, route_slug, "loading.tsx"), self._next_loading_template(issue, route_slug, design_brief)),
+                        (self._resolve_next_special_file(nextjs_profile, route_slug, "error.tsx"), self._next_error_template(issue, route_slug, design_brief)),
                     ]:
                         if special_file is not None:
                             operations.append(
@@ -242,7 +244,7 @@ class CoderAgent(BaseAgent):
                     self._file_operation(
                         editor,
                         layout_file,
-                        self._next_layout_template(route_slug, issue),
+                        self._next_layout_template(route_slug, issue, design_brief),
                         preferred_action=action,
                     )
                 )
@@ -269,6 +271,11 @@ class CoderAgent(BaseAgent):
             seen_paths.add(file_path)
 
         return deduplicated
+
+    def _frontend_design_brief(self, state: AgentState) -> dict[str, Any] | None:
+        planning_context = state.get("planning_context") or {}
+        design_brief = planning_context.get("design_brief")
+        return design_brief if isinstance(design_brief, dict) else None
 
     def _build_nestjs_operations(
         self,
@@ -481,10 +488,11 @@ class CoderAgent(BaseAgent):
         component_file: str | None,
         component_request: str | None,
         issue: str,
+        design_brief: dict[str, Any] | None = None,
     ) -> str:
         page_name = self._humanize_identifier(route_slug or "home")
         component_name = self._to_component_name(component_request or f"{page_name} section")
-        design = self._next_design_direction(issue, route_slug or component_request or page_name)
+        design = self._next_design_direction(issue, route_slug or component_request or page_name, design_brief)
         imports = []
         body_lines = [
             "    <main style={pageStyles.shell}>",
@@ -522,9 +530,9 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
-    def _next_layout_template(self, route_slug: str, issue: str) -> str:
+    def _next_layout_template(self, route_slug: str, issue: str, design_brief: dict[str, Any] | None = None) -> str:
         section_name = self._humanize_identifier(route_slug or "app")
-        design = self._next_design_direction(issue, route_slug or section_name)
+        design = self._next_design_direction(issue, route_slug or section_name, design_brief)
         return (
             'import type { ReactNode } from "react";\n\n'
             "type LayoutProps = {\n"
@@ -550,10 +558,10 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
-    def _next_component_template(self, component_request: str, issue: str, route_slug: str) -> str:
+    def _next_component_template(self, component_request: str, issue: str, route_slug: str, design_brief: dict[str, Any] | None = None) -> str:
         component_name = self._to_component_name(component_request)
         title = self._humanize_identifier(component_request)
-        design = self._next_design_direction(issue, route_slug or component_request)
+        design = self._next_design_direction(issue, route_slug or component_request, design_brief)
         return (
             f"type {component_name}State = \"loading\" | \"empty\" | \"error\" | \"ready\";\n\n"
             f"type {component_name}Item = {{\n"
@@ -623,8 +631,8 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
-    def _next_loading_template(self, issue: str, route_slug: str) -> str:
-        design = self._next_design_direction(issue, route_slug or "feature")
+    def _next_loading_template(self, issue: str, route_slug: str, design_brief: dict[str, Any] | None = None) -> str:
+        design = self._next_design_direction(issue, route_slug or "feature", design_brief)
         return (
             "export default function Loading() {\n"
             "  return (\n"
@@ -635,8 +643,8 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
-    def _next_error_template(self, issue: str, route_slug: str) -> str:
-        design = self._next_design_direction(issue, route_slug or "feature")
+    def _next_error_template(self, issue: str, route_slug: str, design_brief: dict[str, Any] | None = None) -> str:
+        design = self._next_design_direction(issue, route_slug or "feature", design_brief)
         return (
             '"use client";\n\n'
             'type ErrorProps = {\n'
@@ -655,10 +663,11 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
-    def _next_design_direction(self, issue: str, context_hint: str) -> dict[str, str]:
+    def _next_design_direction(self, issue: str, context_hint: str, design_brief: dict[str, Any] | None = None) -> dict[str, str]:
+        style_family = (design_brief or {}).get("style_family")
         lower_issue = f"{issue} {context_hint}".lower()
-        if re.search(r"\b(dashboard|analytics|metric|report|signal)\b", lower_issue):
-            return {
+        if style_family == "dashboard" or re.search(r"\b(dashboard|analytics|metric|report|signal)\b", lower_issue):
+            design = {
                 "eyebrow": "Signal-rich dashboard",
                 "description": "A bold control room layout with clear hierarchy, warm surfaces, and decisive contrast.",
                 "background": "linear-gradient(180deg, #f5efe4 0%, #ebe4d8 100%)",
@@ -677,8 +686,8 @@ class CoderAgent(BaseAgent):
                 "error_copy": "The page is intact, but the live content could not be refreshed just now.",
                 "success_copy": "Designed to surface the strongest numbers first while still leaving room for narrative context.",
             }
-        if re.search(r"\b(login|auth|profile|account|setting)\b", lower_issue):
-            return {
+        elif style_family == "calm" or re.search(r"\b(login|auth|profile|account|setting)\b", lower_issue):
+            design = {
                 "eyebrow": "Calm product surface",
                 "description": "A restrained layout with soft contrast, deliberate spacing, and a calmer tone for high-focus flows.",
                 "background": "linear-gradient(180deg, #f3f7f6 0%, #e6efec 100%)",
@@ -697,25 +706,56 @@ class CoderAgent(BaseAgent):
                 "error_copy": "The shell loaded correctly, but a critical account detail failed to arrive.",
                 "success_copy": "Built for focus-heavy product flows with clear copy and generous breathing room.",
             }
-        return {
-            "eyebrow": "Editorial product surface",
-            "description": "A modern product page with higher contrast, stronger typography, and clear state transitions.",
-            "background": "linear-gradient(180deg, #f6f1ea 0%, #e8ddd0 100%)",
-            "panel": "#fffaf5",
-            "surface": "#f1e4d4",
-            "accent": "#b45309",
-            "text": "#2f241c",
-            "muted": "#6b5a4a",
-            "primary_metric": "24 live",
-            "secondary_metric": "4 queues",
-            "metric_caption": "Primary content is surfaced above the fold.",
-            "secondary_caption": "Supporting actions stay visible without crowding the layout.",
-            "loading_copy": "Preparing the surface and staging the first interaction states.",
-            "empty_copy": "This section is ready, but it has no content yet. Add the first record to bring it to life.",
-            "error_title": "This section needs another pass",
-            "error_copy": "The shell is present, but the content layer hit an unexpected error.",
-            "success_copy": "Structured for a more intentional first impression than a plain scaffold.",
-        }
+        else:
+            design = {
+                "eyebrow": "Editorial product surface",
+                "description": "A modern product page with higher contrast, stronger typography, and clear state transitions.",
+                "background": "linear-gradient(180deg, #f6f1ea 0%, #e8ddd0 100%)",
+                "panel": "#fffaf5",
+                "surface": "#f1e4d4",
+                "accent": "#b45309",
+                "text": "#2f241c",
+                "muted": "#6b5a4a",
+                "primary_metric": "24 live",
+                "secondary_metric": "4 queues",
+                "metric_caption": "Primary content is surfaced above the fold.",
+                "secondary_caption": "Supporting actions stay visible without crowding the layout.",
+                "loading_copy": "Preparing the surface and staging the first interaction states.",
+                "empty_copy": "This section is ready, but it has no content yet. Add the first record to bring it to life.",
+                "error_title": "This section needs another pass",
+                "error_copy": "The shell is present, but the content layer hit an unexpected error.",
+                "success_copy": "Structured for a more intentional first impression than a plain scaffold.",
+            }
+
+        visual_tone = (design_brief or {}).get("visual_tone")
+        if isinstance(visual_tone, str) and visual_tone.strip():
+            design["eyebrow"] = self._humanize_identifier(visual_tone)
+
+        palette_hint = (design_brief or {}).get("palette_hint")
+        if palette_hint == "cool":
+            design.update(
+                {
+                    "background": "linear-gradient(180deg, #eef6f8 0%, #dbe9ef 100%)",
+                    "panel": "#f7fbfc",
+                    "surface": "#deedf1",
+                    "accent": "#0f766e",
+                    "text": "#16343a",
+                    "muted": "#58727a",
+                }
+            )
+        elif palette_hint == "neutral":
+            design.update(
+                {
+                    "background": "linear-gradient(180deg, #f5f5f4 0%, #e7e5e4 100%)",
+                    "panel": "#fafaf9",
+                    "surface": "#eceae7",
+                    "accent": "#57534e",
+                    "text": "#292524",
+                    "muted": "#6b7280",
+                }
+            )
+
+        return design
 
     def _next_api_route_template(self, nextjs_profile: dict[str, Any], route_slug: str) -> str:
         route_name = route_slug or "status"

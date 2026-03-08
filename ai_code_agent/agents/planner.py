@@ -24,6 +24,7 @@ class PlannerAgent(BaseAgent):
         search = CodeSearch(state["workspace_dir"])
         keywords = self._extract_keywords(issue)
         workspace_profile = detect_workspace_profile(state["workspace_dir"])
+        design_brief = self._extract_design_brief(issue, workspace_profile)
         retrieval_mode = self._normalized_retrieval_mode()
         scored_files = self._rank_candidate_files(search, state["workspace_dir"], workspace_profile, keywords, retrieval_mode)
         graph_seed_files = self._graph_seed_files(search, scored_files, keywords) if retrieval_mode == "hybrid" else []
@@ -40,6 +41,7 @@ class PlannerAgent(BaseAgent):
         prompt_payload = {
             "issue": issue,
             "workspace_profile": workspace_profile,
+            "design_brief": design_brief,
             "candidate_files": candidate_files[:10],
         }
         response = self.llm.generate_json(PLANNER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
@@ -53,6 +55,7 @@ class PlannerAgent(BaseAgent):
             "planning_context": {
                 "keywords": keywords[:10],
                 "workspace_profile": workspace_profile,
+                "design_brief": design_brief,
                 "retrieval_strategy": retrieval_mode,
                 "candidate_explanations_schema_version": 2,
                 "graph_seed_files": graph_seed_files,
@@ -122,6 +125,45 @@ class PlannerAgent(BaseAgent):
         if candidate_files:
             steps.insert(1, f"Start with: {', '.join(candidate_files[:5])}")
         return "\n".join(f"- {step}" for step in steps)
+
+    def _extract_design_brief(self, issue: str, workspace_profile: dict) -> dict[str, object] | None:
+        lower_issue = issue.lower()
+        is_frontend_request = bool(
+            workspace_profile.get("nextjs")
+            or re.search(r"\b(next|frontend|page|layout|component|hero|section|dashboard|screen|view|ui|visual)\b", lower_issue)
+        )
+        if not is_frontend_request:
+            return None
+
+        if re.search(r"\b(dashboard|analytics|metric|report|signal)\b", lower_issue):
+            style_family = "dashboard"
+        elif re.search(r"\b(profile|account|auth|login|setting|minimal|calm|quiet|clean)\b", lower_issue):
+            style_family = "calm"
+        else:
+            style_family = "editorial"
+
+        visual_tone = None
+        for tone in ["signal-rich", "calm", "minimal", "bold", "editorial", "immersive", "quiet"]:
+            if tone in lower_issue:
+                visual_tone = tone
+                break
+
+        if re.search(r"\b(cool|teal|slate|blue|mint)\b", lower_issue):
+            palette_hint = "cool"
+        elif re.search(r"\b(warm|amber|sand|gold|terracotta)\b", lower_issue):
+            palette_hint = "warm"
+        elif re.search(r"\b(neutral|mono|monochrome|stone)\b", lower_issue):
+            palette_hint = "neutral"
+        else:
+            palette_hint = "cool" if style_family == "calm" else "warm"
+
+        return {
+            "style_family": style_family,
+            "visual_tone": visual_tone,
+            "palette_hint": palette_hint,
+            "state_coverage": ["loading", "empty", "error", "success"],
+            "source": "issue_keywords",
+        }
 
     def _score_candidate_files(self, search: CodeSearch, keywords: list[str]) -> list[tuple[str, int]]:
         scores: dict[str, int] = defaultdict(int)

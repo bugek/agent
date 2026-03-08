@@ -61,6 +61,25 @@ class CoderFrontendQualityTest(unittest.TestCase):
         self.assertIn('onClick={reset}', content)
         self.assertIn("Try again", content)
 
+    def test_design_brief_can_override_visual_direction(self) -> None:
+        design_brief = {
+            "style_family": "calm",
+            "visual_tone": "quiet studio",
+            "palette_hint": "cool",
+        }
+
+        content = self.coder._next_component_template(
+            "profile panel",
+            "create account settings page",
+            "settings",
+            design_brief,
+        )
+
+        self.assertIn("Quiet Studio", content)
+        self.assertIn('background: "#f7fbfc"', content)
+        self.assertIn('color: "#16343a"', content)
+        self.assertIn("Built for focus-heavy product flows", content)
+
     def test_nextjs_app_route_operations_include_loading_and_error_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
