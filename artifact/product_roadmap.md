@@ -90,6 +90,11 @@ Current progress:
 4. Metrics, audit trails, and failure analysis
 5. PR automation และ issue integration ที่ครบขึ้น
 
+Current progress:
+1. Started through the observability and review-controls slice.
+2. Policy-based edit restrictions, structured review summaries, audit trails, and persisted execution metrics are already in place.
+3. Retry orchestration now includes remediation-aware `targeted_retry`, historical strategy selection between `targeted_retry` and `full`, and an early-stop path after a failed full fallback.
+
 ## 12-Month Direction
 
 ### Quarter 1
@@ -129,8 +134,8 @@ Current progress:
 
 ลำดับที่ควรทำต่อจากจุดนี้:
 
-1. Multi-file edit engine
-2. JS/TS tester pipeline
-3. Next.js support
-4. NestJS support
-5. Hybrid code index
+1. CI integration that publishes validation and diagnostics artifacts on every push/PR
+2. Deeper GitHub and Azure DevOps issue, branch, and PR workflow support
+3. Better sandbox backends, especially remote or production-like execution options
+4. Richer retry-policy tuning from larger history windows and operator feedback
+5. Operator-facing failure taxonomy and dashboard-oriented diagnostics

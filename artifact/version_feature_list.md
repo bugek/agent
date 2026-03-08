@@ -167,11 +167,19 @@ Exit Criteria:
 เป้าหมาย: เตรียมขึ้น production workload
 
 Current progress:
-1. Started
+1. Released as the current baseline for the production-readiness foundation.
 2. Execution metrics schema is now defined in `artifact/execution_metrics_schema.md`, with a run-level aggregate model and a normalized event target layered over existing telemetry.
 3. Workflow runs now persist `.ai-code-agent/runs/<run_id>/metrics.json`, and `ai_code_agent.main diagnose` can inspect the latest or requested run artifact.
 4. `execution_events` now emit `node_started` and `node_completed` records with run id, sequence, attempt, normalized status, and duration metadata.
 5. Tester command execution now records per-command durations, timeout flags, and slowest-command summaries into run-level testing metrics.
+6. Retry orchestration now uses recent `execution_metrics` history to choose between `targeted_retry` and `full`, and records policy reason plus history source in testing summaries and audit trails.
+7. The orchestrator can now stop retrying after a failed full fallback that followed a targeted retry, reducing unproductive remediation loops.
+
+Release notes:
+1. Bumps the package baseline to `0.9.0`.
+2. Makes persisted metrics artifacts and diagnose output part of the official operator workflow.
+3. Ships adaptive retry-policy selection from recent run history as the first production-readiness tuning step.
+4. Adds a stop condition after failed full fallback retries so remediation loops can terminate earlier when another pass is unlikely to help.
 
 Features:
 1. CI integration

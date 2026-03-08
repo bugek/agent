@@ -53,3 +53,5 @@ class AgentConfig:
     
     # Internal orchestrator limits
     max_retries: int = int(os.getenv("MAX_RETRIES", "3"))
+    retry_history_window: int = int(os.getenv("RETRY_HISTORY_WINDOW", "10"))
+    retry_policy_min_samples: int = int(os.getenv("RETRY_POLICY_MIN_SAMPLES", "2"))

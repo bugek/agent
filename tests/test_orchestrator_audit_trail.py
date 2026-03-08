@@ -158,6 +158,9 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
                 "selected_command_labels": ["compileall"],
                 "skipped_command_labels": ["script:test"],
                 "requested_retry_labels": ["script:test"],
+                "retry_policy_reason": "default_targeted_retry",
+                "retry_policy_history_source": None,
+                "stop_retry_after_failure": False,
             },
             "visual_review": None,
         }
@@ -228,7 +231,22 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["selected_command_count"], 1)
         self.assertEqual(event["details"]["skipped_command_count"], 1)
         self.assertEqual(event["details"]["requested_retry_count"], 1)
+        self.assertEqual(event["details"]["retry_policy_reason"], "default_targeted_retry")
+        self.assertEqual(event["details"]["retry_policy_history_source"], None)
+        self.assertEqual(event["details"]["stop_retry_after_failure"], False)
         self.assertEqual(result["execution_metrics"]["testing"]["status"], "failed")
+
+    def test_should_continue_stops_after_full_fallback_failure(self) -> None:
+        route = orchestrator.should_continue(
+            {
+                "review_approved": False,
+                "test_passed": False,
+                "retry_count": 1,
+                "testing_summary": {"stop_retry_after_failure": True},
+            }
+        )
+
+        self.assertEqual(route, "fail")
 
 
 if __name__ == "__main__":

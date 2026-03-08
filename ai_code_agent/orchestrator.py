@@ -236,6 +236,9 @@ def test_node(state: AgentState) -> dict[str, Any]:
             "selected_command_count": len(result.get("testing_summary", {}).get("selected_command_labels", [])),
             "skipped_command_count": len(result.get("testing_summary", {}).get("skipped_command_labels", [])),
             "requested_retry_count": len(result.get("testing_summary", {}).get("requested_retry_labels", [])),
+            "retry_policy_reason": result.get("testing_summary", {}).get("retry_policy_reason"),
+            "retry_policy_history_source": result.get("testing_summary", {}).get("retry_policy_history_source"),
+            "stop_retry_after_failure": bool(result.get("testing_summary", {}).get("stop_retry_after_failure", False)),
         },
     )
     return _finalize_result(state, result)
@@ -310,6 +313,10 @@ def should_continue(state: AgentState) -> str:
     """Routing logic after a review or test."""
     if state["review_approved"] and state["test_passed"]:
         return "create_pr"
+
+    testing_summary = state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {}
+    if bool(testing_summary.get("stop_retry_after_failure", False)) and not state.get("test_passed", False):
+        return "fail"
 
     if state["retry_count"] >= AgentConfig().max_retries:
         return "fail"

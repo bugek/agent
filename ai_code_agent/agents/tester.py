@@ -9,6 +9,7 @@ VISUAL_REVIEW_SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 RESPONSIVE_REQUIRED_CATEGORIES = {"mobile", "desktop"}
 
 from ai_code_agent.agents.base import BaseAgent
+from ai_code_agent.metrics import list_execution_metrics_artifacts
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.tools.linter import LinterTool
 from ai_code_agent.tools.sandbox import SandboxRunner
@@ -117,11 +118,14 @@ class TesterAgent(BaseAgent):
             "selected_command_labels": validation_plan.get("selected_labels", []) if isinstance(validation_plan, dict) else [],
             "skipped_command_labels": validation_plan.get("skipped_labels", []) if isinstance(validation_plan, dict) else [],
             "requested_retry_labels": validation_plan.get("requested_retry_labels", []) if isinstance(validation_plan, dict) else [],
+            "retry_policy_reason": validation_plan.get("policy_reason") if isinstance(validation_plan, dict) else None,
+            "retry_policy_history_source": validation_plan.get("history_source") if isinstance(validation_plan, dict) else None,
+            "stop_retry_after_failure": bool(validation_plan.get("stop_retry_after_failure", False)) if isinstance(validation_plan, dict) else False,
         }
 
     def _build_validation_plan(self, state: AgentState, workspace_profile: dict) -> dict[str, Any]:
         full_commands = self._build_validation_commands(state, workspace_profile)
-        selected_commands, requested_retry_labels = self._select_retry_commands(state, full_commands)
+        selected_commands, requested_retry_labels, policy_reason, history_source = self._select_retry_commands(state, full_commands)
         selected_labels = [label for label, _, _, _ in selected_commands]
         full_labels = [label for label, _, _, _ in full_commands]
         skipped_labels = [label for label in full_labels if label not in selected_labels]
@@ -132,6 +136,9 @@ class TesterAgent(BaseAgent):
             "selected_labels": selected_labels,
             "skipped_labels": skipped_labels,
             "requested_retry_labels": requested_retry_labels,
+            "policy_reason": policy_reason,
+            "history_source": history_source,
+            "stop_retry_after_failure": policy_reason == "fallback_to_full_after_targeted_retry",
         }
 
     def _build_validation_commands(self, state: AgentState, workspace_profile: dict) -> list[tuple[str, str, int, dict[str, str] | None]]:
@@ -154,14 +161,14 @@ class TesterAgent(BaseAgent):
         self,
         state: AgentState,
         full_commands: list[tuple[str, str, int, dict[str, str] | None]],
-    ) -> tuple[list[tuple[str, str, int, dict[str, str] | None]], list[str]]:
+    ) -> tuple[list[tuple[str, str, int, dict[str, str] | None]], list[str], str | None, str | None]:
         if int(state.get("retry_count", 0) or 0) <= 0:
-            return full_commands, []
+            return full_commands, [], "initial_full_validation", None
 
         review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
         remediation = review_summary.get("remediation") if isinstance(review_summary.get("remediation"), dict) else {}
         if not remediation.get("required"):
-            return full_commands, []
+            return full_commands, [], "remediation_not_required", None
 
         requested_labels = list(
             dict.fromkeys(
@@ -179,7 +186,24 @@ class TesterAgent(BaseAgent):
             )
         )
         if not requested_labels:
-            return full_commands, []
+            return full_commands, [], "no_retry_signals", None
+
+        previous_strategy = None
+        prior_testing_summary = state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {}
+        if isinstance(prior_testing_summary.get("validation_strategy"), str):
+            previous_strategy = prior_testing_summary.get("validation_strategy")
+
+        if previous_strategy == "targeted_retry" and int(state.get("retry_count", 0) or 0) > 1:
+            return full_commands, requested_labels, "fallback_to_full_after_targeted_retry", "previous_attempt"
+
+        failure_category = self._retry_failure_category(state)
+        history_profile = self._historical_retry_strategy_profile(
+            state.get("workspace_dir", "."),
+            state.get("run_id"),
+            failure_category,
+        )
+        if history_profile.get("preferred_strategy") == "full":
+            return full_commands, requested_labels, "history_prefers_full", history_profile.get("source")
 
         selected: list[tuple[str, str, int, dict[str, str] | None]] = []
         for command in full_commands:
@@ -190,14 +214,107 @@ class TesterAgent(BaseAgent):
                 selected.append(command)
 
         if not selected:
-            return full_commands, requested_labels
+            return full_commands, requested_labels, "requested_labels_not_available", history_profile.get("source")
 
         needs_install = any(label != "compileall" and label != "cli-help" for label, _, _, _ in selected)
         package_install = next((command for command in full_commands if command[0] == "package-install"), None)
         if package_install is not None and needs_install:
             selected.insert(0, package_install)
 
-        return selected, requested_labels
+        policy_reason = "default_targeted_retry"
+        if history_profile.get("preferred_strategy") == "targeted_retry":
+            policy_reason = "history_prefers_targeted_retry"
+        return selected, requested_labels, policy_reason, history_profile.get("source")
+
+    def _retry_failure_category(self, state: AgentState) -> str | None:
+        execution_metrics = state.get("execution_metrics") if isinstance(state.get("execution_metrics"), dict) else {}
+        failures = execution_metrics.get("failures") if isinstance(execution_metrics.get("failures"), dict) else {}
+        primary_category = failures.get("primary_category")
+        return primary_category if isinstance(primary_category, str) and primary_category else None
+
+    def _historical_retry_strategy_profile(
+        self,
+        workspace_dir: str,
+        current_run_id: str | None,
+        failure_category: str | None,
+    ) -> dict[str, Any]:
+        category_stats = self._collect_strategy_stats(workspace_dir, current_run_id, failure_category)
+        if self._has_comparable_history(category_stats):
+            preferred_strategy = self._preferred_strategy(category_stats)
+            return {"source": "failure_category", "preferred_strategy": preferred_strategy, "stats": category_stats}
+
+        overall_stats = self._collect_strategy_stats(workspace_dir, current_run_id, None)
+        if self._has_comparable_history(overall_stats):
+            preferred_strategy = self._preferred_strategy(overall_stats)
+            return {"source": "overall", "preferred_strategy": preferred_strategy, "stats": overall_stats}
+
+        return {"source": None, "preferred_strategy": None, "stats": overall_stats}
+
+    def _collect_strategy_stats(
+        self,
+        workspace_dir: str,
+        current_run_id: str | None,
+        failure_category: str | None,
+    ) -> dict[str, dict[str, float | int]]:
+        metrics_entries = list_execution_metrics_artifacts(workspace_dir, limit=max(1, self.config.retry_history_window))
+        stats: dict[str, dict[str, float | int]] = {
+            "full": {"run_count": 0, "approved_count": 0, "total_testing_duration_ms": 0},
+            "targeted_retry": {"run_count": 0, "approved_count": 0, "total_testing_duration_ms": 0},
+        }
+
+        for metrics, _ in metrics_entries:
+            if not isinstance(metrics, dict):
+                continue
+            if current_run_id and metrics.get("run_id") == current_run_id:
+                continue
+            workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+            testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+            failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+            if _as_int(workflow.get("attempt_count")) <= 1:
+                continue
+            if workflow.get("status") == "aborted":
+                continue
+            if failure_category and failures.get("primary_category") != failure_category:
+                continue
+            strategy = testing.get("validation_strategy") if testing.get("validation_strategy") == "targeted_retry" else "full"
+            bucket = stats[strategy]
+            bucket["run_count"] += 1
+            bucket["total_testing_duration_ms"] += _as_int(testing.get("total_duration_ms"))
+            if workflow.get("status") == "approved":
+                bucket["approved_count"] += 1
+
+        return stats
+
+    def _has_comparable_history(self, stats: dict[str, dict[str, float | int]]) -> bool:
+        return any(_as_int(bucket.get("run_count")) >= self.config.retry_policy_min_samples for bucket in stats.values())
+
+    def _preferred_strategy(self, stats: dict[str, dict[str, float | int]]) -> str | None:
+        full_summary = self._strategy_summary(stats.get("full", {}))
+        targeted_summary = self._strategy_summary(stats.get("targeted_retry", {}))
+
+        if targeted_summary["run_count"] < self.config.retry_policy_min_samples and full_summary["run_count"] < self.config.retry_policy_min_samples:
+            return None
+        if targeted_summary["run_count"] < self.config.retry_policy_min_samples:
+            return "full"
+        if full_summary["run_count"] < self.config.retry_policy_min_samples:
+            return "targeted_retry"
+        if full_summary["success_rate"] > targeted_summary["success_rate"]:
+            return "full"
+        if targeted_summary["success_rate"] > full_summary["success_rate"]:
+            return "targeted_retry"
+        if full_summary["average_testing_duration_ms"] < targeted_summary["average_testing_duration_ms"]:
+            return "full"
+        return "targeted_retry"
+
+    def _strategy_summary(self, bucket: dict[str, float | int]) -> dict[str, float | int]:
+        run_count = _as_int(bucket.get("run_count"))
+        approved_count = _as_int(bucket.get("approved_count"))
+        total_testing_duration_ms = _as_int(bucket.get("total_testing_duration_ms"))
+        return {
+            "run_count": run_count,
+            "success_rate": round(approved_count / run_count, 2) if run_count else 0.0,
+            "average_testing_duration_ms": int(total_testing_duration_ms / run_count) if run_count else 0,
+        }
 
     def _visual_retry_labels(
         self,
@@ -571,3 +688,7 @@ class TesterAgent(BaseAgent):
     def _is_next_component_file(self, file_path: str) -> bool:
         normalized = file_path.replace("\\", "/")
         return "/components/" in f"/{normalized}" or normalized.startswith("components/")
+
+
+def _as_int(value: Any) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0

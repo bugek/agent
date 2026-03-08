@@ -6,6 +6,25 @@ Welcome to the AI Code Agent project! This file serves as the primary documentat
 
 This project is an autonomous software engineering agent system. It is designed to take an issue description, search the codebase, formulate a plan, edit code, run tests within a sandbox, and ultimately submit a Pull Request.
 
+## Current Status and Future
+
+Current status:
+
+1. `v0.9.0` is the current project baseline.
+2. The planner, coder, tester, and reviewer loop is working end-to-end with persisted execution metrics and diagnose output.
+3. Next.js and NestJS workflows are supported with committed smoke fixtures and full validation coverage.
+4. Retrieval is hybrid and explainable through candidate reasons, explanation edges, graph seed files, and structured `edit_intent`.
+5. Review-driven remediation, tester `targeted_retry`, adaptive retry-policy selection from recent run history, and retry-effectiveness diagnostics are implemented and validated.
+6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, and retry recovery reporting.
+
+Future:
+
+- Deeper GitHub and Azure DevOps issue, branch, and PR workflow support.
+- Better sandbox backends, including stronger remote or production-like execution options.
+- Further retry orchestration tuning based on larger historical windows, operator feedback, and richer stop/continue policies.
+- Higher-level operator diagnostics such as dashboard-oriented summaries and richer failure comparisons.
+- Final product-baseline hardening toward `v1.0.0`, including more stable multi-stack support, onboarding, and operational guidance.
+
 ## Architecture Highlights
 
 We use a Multi-Agent architecture orchestrated via a State Machine. When `langgraph` is installed the project uses it directly; otherwise it falls back to a local in-process executor so the CLI can still run smoke checks.
@@ -127,6 +146,7 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 - The tester can prefer Next.js-specific lint, typecheck, and build validation paths when a Next.js workspace is detected.
 - The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
 - The tester can switch to a `targeted_retry` validation strategy on remediation loops, using prior failed validation labels, failed commands, and visual-review blockers to reduce rerun cost while preserving relevant checks.
+- The tester can also consult recent `execution_metrics` history on retry attempts to choose between `targeted_retry` and `full`, and can tell the orchestrator to stop after a failed full fallback when another loop is unlikely to help.
 - The execution metrics layer now captures remediation effectiveness signals such as retry recovery, remediation-assisted recovery, edit-intent-assisted recovery, skipped-command totals, and command reduction rates for targeted retries.
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
 - The planner and coder now share remediation-aware `edit_intent` metadata so retry loops can stay focused on the files, reasons, and validation targets that failed in the previous attempt.
