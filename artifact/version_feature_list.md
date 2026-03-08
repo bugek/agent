@@ -175,6 +175,7 @@ Current progress:
 6. Retry orchestration now uses recent `execution_metrics` history to choose between `targeted_retry` and `full`, and records policy reason plus history source in testing summaries and audit trails.
 7. The orchestrator can now stop retrying after a failed full fallback that followed a targeted retry, reducing unproductive remediation loops.
 8. GitHub issue URLs and Azure DevOps work item URLs can now be resolved into issue context before planning, and successful auto-push runs can publish provider-specific PRs plus source-thread comments when credentials are configured.
+9. Sandbox backend negotiation now supports `auto`, `docker`, `local`, and `docker_required`, while testing metrics record the resolved backend and fallback reason for operator diagnostics.
 
 Release notes:
 1. Bumps the package baseline to `0.9.0`.
@@ -182,6 +183,7 @@ Release notes:
 3. Ships adaptive retry-policy selection from recent run history as the first production-readiness tuning step.
 4. Adds a stop condition after failed full fallback retries so remediation loops can terminate earlier when another pass is unlikely to help.
 5. Adds provider-aware issue enrichment and remote PR publishing for GitHub and Azure DevOps workflows.
+6. Adds inspectable sandbox backend negotiation with fallback diagnostics for local versus Docker execution.
 
 Features:
 1. CI integration

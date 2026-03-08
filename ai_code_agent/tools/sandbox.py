@@ -3,6 +3,7 @@ import time
 import shutil
 import subprocess
 
+
 class SandboxRunner:
     """
     Executes commands inside a safe, isolated container (e.g., Docker).
@@ -11,15 +12,71 @@ class SandboxRunner:
     def __init__(self, container_image: str, workspace_dir: str = ".", mode: str = "local"):
         self.image = container_image
         self.workspace = workspace_dir
-        self.mode = mode
+        self.mode = (mode or "auto").lower()
+        self.requested_mode = self.mode
+        self.startup_details = {
+            "requested_mode": self.requested_mode,
+            "resolved_mode": self.mode,
+            "started": False,
+            "fallback_reason": None,
+            "docker_available": False,
+            "image_available": False,
+        }
         self.container_started = False
         
     def start_container(self):
         """Spools up the sandbox container."""
-        if self.mode != "docker" or shutil.which("docker") is None:
+        docker_available = shutil.which("docker") is not None
+        self.startup_details = {
+            "requested_mode": self.requested_mode,
+            "resolved_mode": self.mode,
+            "started": False,
+            "fallback_reason": None,
+            "docker_available": docker_available,
+            "image_available": False,
+        }
+
+        if self.requested_mode == "local":
             self.mode = "local"
             self.container_started = True
-            return {"mode": self.mode, "started": True}
+            self.startup_details.update({"resolved_mode": "local", "started": True})
+            return dict(self.startup_details)
+
+        if self.requested_mode not in {"auto", "docker", "docker_required"}:
+            self.mode = "local"
+            self.container_started = True
+            self.startup_details.update(
+                {
+                    "resolved_mode": "local",
+                    "started": True,
+                    "fallback_reason": f"unsupported_mode:{self.requested_mode}",
+                }
+            )
+            return dict(self.startup_details)
+
+        if not docker_available:
+            if self.requested_mode == "docker_required":
+                self.mode = "docker_required"
+                self.container_started = False
+                self.startup_details.update(
+                    {
+                        "resolved_mode": "unavailable",
+                        "started": False,
+                        "fallback_reason": "docker_unavailable",
+                    }
+                )
+                return dict(self.startup_details)
+
+            self.mode = "local"
+            self.container_started = True
+            self.startup_details.update(
+                {
+                    "resolved_mode": "local",
+                    "started": True,
+                    "fallback_reason": "docker_unavailable",
+                }
+            )
+            return dict(self.startup_details)
 
         result = subprocess.run(
             ["docker", "image", "inspect", self.image],
@@ -27,11 +84,36 @@ class SandboxRunner:
             text=True,
             check=False,
         )
-        self.container_started = result.returncode == 0
-        if not self.container_started:
+        image_available = result.returncode == 0
+        self.startup_details["image_available"] = image_available
+        self.container_started = image_available
+        if not image_available:
+            if self.requested_mode == "docker_required":
+                self.mode = "docker_required"
+                self.container_started = False
+                self.startup_details.update(
+                    {
+                        "resolved_mode": "unavailable",
+                        "started": False,
+                        "fallback_reason": "docker_image_missing",
+                    }
+                )
+                return dict(self.startup_details)
+
             self.mode = "local"
             self.container_started = True
-        return {"mode": self.mode, "started": self.container_started}
+            self.startup_details.update(
+                {
+                    "resolved_mode": "local",
+                    "started": True,
+                    "fallback_reason": "docker_image_missing",
+                }
+            )
+            return dict(self.startup_details)
+
+        self.mode = "docker"
+        self.startup_details.update({"resolved_mode": "docker", "started": True})
+        return dict(self.startup_details)
         
     def execute(self, cmd: str, timeout: int = 60, env: dict[str, str] | None = None) -> dict:
         """
@@ -39,7 +121,16 @@ class SandboxRunner:
         Returns dict with stdout, stderr, and exit_code.
         """
         if not self.container_started:
-            self.start_container()
+            startup = self.start_container()
+            if not startup.get("started", False):
+                return {
+                    "stdout": "",
+                    "stderr": f"Sandbox backend unavailable: {startup.get('fallback_reason') or 'startup_failed'}",
+                    "exit_code": 125,
+                    "mode": startup.get("resolved_mode") or self.mode,
+                    "duration_ms": 0,
+                    "timed_out": False,
+                }
 
         runtime_env = os.environ.copy()
         if env:

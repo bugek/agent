@@ -57,6 +57,10 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "selected_command_labels": ["script:build"],
                     "skipped_command_labels": ["compileall"],
                     "requested_retry_labels": ["script:build"],
+                    "sandbox_requested_mode": "auto",
+                    "sandbox_mode": "local",
+                    "sandbox_started": True,
+                    "sandbox_fallback_reason": "docker_unavailable",
                 },
                 "visual_review": {
                     "enabled": True,
@@ -108,6 +112,10 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["selected_command_count"], 1)
         self.assertEqual(metrics["testing"]["skipped_command_count"], 1)
         self.assertEqual(metrics["testing"]["requested_retry_labels"], ["script:build"])
+        self.assertEqual(metrics["testing"]["sandbox_requested_mode"], "auto")
+        self.assertEqual(metrics["testing"]["sandbox_mode"], "local")
+        self.assertEqual(metrics["testing"]["sandbox_started"], True)
+        self.assertEqual(metrics["testing"]["sandbox_fallback_reason"], "docker_unavailable")
         self.assertEqual(metrics["testing"]["command_reduction_rate"], 0.5)
         self.assertEqual(metrics["testing"]["slowest_command"]["label"], "script:build")
         self.assertEqual(metrics["testing"]["commands"][1]["duration_ms"], 980)

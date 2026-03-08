@@ -249,6 +249,10 @@ The repository can implement this incrementally by first deriving `execution_met
 - `testing.failed_commands`: labels whose exit code is non-zero.
 - `testing.lint_issue_count`: parsed from `lint:` section when practical, else optional.
 - `testing.total_duration_ms`: summed duration across validation commands.
+- `testing.sandbox_requested_mode`: configured backend preference such as `auto`, `docker`, `local`, or `docker_required`.
+- `testing.sandbox_mode`: resolved backend actually used for this run.
+- `testing.sandbox_started`: whether the selected backend started successfully.
+- `testing.sandbox_fallback_reason`: fallback or failure reason when the requested backend could not be used directly.
 - `testing.validation_strategy`: `full` or `targeted_retry`.
 - `testing.selected_command_count`: count of commands kept for the current validation pass.
 - `testing.skipped_command_count`: count of commands omitted on a targeted retry pass.

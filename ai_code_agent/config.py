@@ -45,7 +45,7 @@ class AgentConfig:
     azure_devops_target_branch: str = field(default_factory=lambda: os.getenv("AZURE_DEVOPS_TARGET_BRANCH", "main"))
     
     # Sandbox
-    sandbox_mode: str = field(default_factory=lambda: os.getenv("SANDBOX_MODE", "docker"))
+    sandbox_mode: str = field(default_factory=lambda: os.getenv("SANDBOX_MODE", "auto"))
     docker_image: str = field(default_factory=lambda: os.getenv("DOCKER_IMAGE_NAME", "ai-code-agent-sandbox:latest"))
 
     # Runtime behavior

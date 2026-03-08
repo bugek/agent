@@ -96,6 +96,7 @@ Current progress:
 3. Retry orchestration now includes remediation-aware `targeted_retry`, historical strategy selection between `targeted_retry` and `full`, and an early-stop path after a failed full fallback.
 4. GitHub Actions validation now publishes `.ai-code-agent` artifacts so teams can inspect validation logs, run metrics, and diagnostics snapshots from CI runs.
 5. GitHub issue and Azure DevOps work item inputs can now enrich the planning prompt, and successful auto-push runs can publish provider-specific PRs plus source-thread comments.
+6. Sandbox execution can now negotiate between `auto`, `docker`, `local`, and `docker_required`, with fallback reasons surfaced in tester summaries and execution metrics.
 
 ## 12-Month Direction
 

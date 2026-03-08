@@ -145,6 +145,7 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 - NestJS workspaces are profiled for root bootstrap files, modules, controllers, services, DTOs, and common HTTP-layer primitives.
 - The tester can prefer Next.js-specific lint, typecheck, and build validation paths when a Next.js workspace is detected.
 - The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
+- Sandbox backend selection now supports `auto`, `docker`, `local`, and `docker_required`; tester summaries and execution metrics record the requested backend, resolved backend, and fallback reason when Docker is unavailable or the image is missing.
 - The tester can switch to a `targeted_retry` validation strategy on remediation loops, using prior failed validation labels, failed commands, and visual-review blockers to reduce rerun cost while preserving relevant checks.
 - The tester can also consult recent `execution_metrics` history on retry attempts to choose between `targeted_retry` and `full`, and can tell the orchestrator to stop after a failed full fallback when another loop is unlikely to help.
 - The execution metrics layer now captures remediation effectiveness signals such as retry recovery, remediation-assisted recovery, edit-intent-assisted recovery, skipped-command totals, and command reduction rates for targeted retries.

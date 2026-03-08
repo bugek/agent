@@ -30,7 +30,7 @@ class TesterAgent(BaseAgent):
             workspace_dir=state["workspace_dir"],
             mode=self.config.sandbox_mode,
         )
-        sandbox.start_container()
+        sandbox_startup = sandbox.start_container()
 
         validation_plan = self._build_validation_plan(state, workspace_profile)
         command_results = self._run_validation_commands(sandbox, validation_plan["commands"])
@@ -56,7 +56,7 @@ class TesterAgent(BaseAgent):
         return {
             "test_passed": test_passed,
             "test_results": "\n\n".join(combined_output).strip(),
-            "testing_summary": self._build_testing_summary(command_results, lint_output, validation_plan),
+            "testing_summary": self._build_testing_summary(command_results, lint_output, validation_plan, sandbox_startup),
             "visual_review": self._build_visual_review(state, workspace_profile, command_results),
         }
 
@@ -81,6 +81,7 @@ class TesterAgent(BaseAgent):
         command_results: list[dict],
         lint_output: list[str],
         validation_plan: dict[str, Any] | None = None,
+        sandbox_startup: dict[str, Any] | None = None,
     ) -> dict[str, object]:
         commands: list[dict[str, object]] = []
         total_duration_ms = 0
@@ -121,6 +122,10 @@ class TesterAgent(BaseAgent):
             "retry_policy_reason": validation_plan.get("policy_reason") if isinstance(validation_plan, dict) else None,
             "retry_policy_history_source": validation_plan.get("history_source") if isinstance(validation_plan, dict) else None,
             "stop_retry_after_failure": bool(validation_plan.get("stop_retry_after_failure", False)) if isinstance(validation_plan, dict) else False,
+            "sandbox_requested_mode": sandbox_startup.get("requested_mode") if isinstance(sandbox_startup, dict) else None,
+            "sandbox_mode": sandbox_startup.get("resolved_mode") if isinstance(sandbox_startup, dict) else (commands[0].get("mode") if commands else None),
+            "sandbox_started": bool(sandbox_startup.get("started", False)) if isinstance(sandbox_startup, dict) else True,
+            "sandbox_fallback_reason": sandbox_startup.get("fallback_reason") if isinstance(sandbox_startup, dict) else None,
         }
 
     def _build_validation_plan(self, state: AgentState, workspace_profile: dict) -> dict[str, Any]:

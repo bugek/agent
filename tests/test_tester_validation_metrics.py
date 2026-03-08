@@ -24,6 +24,7 @@ class TesterValidationMetricsTest(unittest.TestCase):
             ],
             ["[src/app.ts] warning"],
             {"strategy": "targeted_retry", "selected_labels": ["compileall", "script:build"], "skipped_labels": ["script:test"], "requested_retry_labels": ["script:build"]},
+            {"requested_mode": "auto", "resolved_mode": "local", "started": True, "fallback_reason": "docker_unavailable"},
         )
 
         self.assertEqual(summary["command_count"], 2)
@@ -40,6 +41,10 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertIsNone(summary["retry_policy_reason"])
         self.assertIsNone(summary["retry_policy_history_source"])
         self.assertEqual(summary["stop_retry_after_failure"], False)
+        self.assertEqual(summary["sandbox_requested_mode"], "auto")
+        self.assertEqual(summary["sandbox_mode"], "local")
+        self.assertEqual(summary["sandbox_started"], True)
+        self.assertEqual(summary["sandbox_fallback_reason"], "docker_unavailable")
 
     def test_build_validation_plan_targets_retry_failures_for_nextjs_workspace(self) -> None:
         workspace_profile = {
