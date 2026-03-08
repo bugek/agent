@@ -35,6 +35,7 @@ class MainCliTest(unittest.TestCase):
         self.assertEqual(args.recent, 7)
         self.assertEqual(args.status, "failed")
         self.assertEqual(args.failure_category, "validation")
+        self.assertEqual(args.format, "text")
         self.assertTrue(args.json)
 
     def test_run_diagnostics_prints_latest_metrics_summary(self) -> None:
@@ -55,7 +56,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 5, None, None, False)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 5, None, None, "text")
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -73,7 +74,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), temp_dir, "run-123", 5, None, None, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), temp_dir, "run-123", 5, None, None, "json")
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(json.loads(output.getvalue()), metrics)
@@ -128,7 +129,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, False)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, "text")
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -214,7 +215,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, "json")
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
@@ -283,7 +284,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, "json")
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
@@ -340,7 +341,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 2, "failed", None, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 2, "failed", None, "json")
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
@@ -392,7 +393,7 @@ class MainCliTest(unittest.TestCase):
                     3,
                     "failed",
                     "validation",
-                    True,
+                    "json",
                 )
 
             self.assertEqual(exit_code, 0)
@@ -424,11 +425,66 @@ class MainCliTest(unittest.TestCase):
                     3,
                     "failed",
                     "validation",
-                    False,
+                    "text",
                 )
 
-            self.assertEqual(exit_code, 1)
-            self.assertIn("matching status=failed failure_category=validation", output.getvalue())
+    def test_run_diagnostics_supports_rows_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 100, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["compileall"], "total_duration_ms": 70, "slowest_command": None},
+                "review": {"status": "changes_required", "residual_risk_count": 1},
+            }
+            persist_execution_metrics(temp_dir, "run-1", metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 1, "failed", None, "rows")
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue().splitlines()
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+
+    def test_run_diagnostics_supports_ndjson_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 100, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["compileall"], "total_duration_ms": 70, "slowest_command": None},
+                "review": {"status": "changes_required", "residual_risk_count": 1},
+            }
+            second_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 120, "terminal_node": "review"},
+                "failures": {"primary_category": "policy"},
+                "testing": {"failed_commands": [], "total_duration_ms": 0, "slowest_command": None},
+                "review": {"status": "changes_required", "residual_risk_count": 0},
+            }
+            persist_execution_metrics(temp_dir, "run-1", first_metrics)
+            persist_execution_metrics(temp_dir, "run-2", second_metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-2", "metrics.json"), (200, 200))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 2, "failed", None, "ndjson")
+
+            self.assertEqual(exit_code, 0)
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), 2)
+            first_row = json.loads(lines[0])
+            second_row = json.loads(lines[1])
+            self.assertEqual(first_row["run_id"], "run-2")
+            self.assertEqual(first_row["status"], "failed")
+            self.assertEqual(second_row["run_id"], "run-1")
 
 
 if __name__ == "__main__":

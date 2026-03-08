@@ -32,6 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     diagnose_parser.add_argument("--recent", type=int, default=5, help="Number of recent runs to include when summarizing without --run-id")
     diagnose_parser.add_argument("--status", choices=["approved", "failed", "aborted", "changes_required"], help="Filter recent runs by workflow status")
     diagnose_parser.add_argument("--failure-category", type=str, required=False, help="Filter recent runs by primary failure category")
+    diagnose_parser.add_argument("--format", choices=["text", "json", "ndjson", "rows"], default="text", help="Output format for diagnostics export")
     diagnose_parser.add_argument("--json", action="store_true", help="Print the metrics artifact as JSON")
 
     if not arguments or arguments[0].startswith("-"):
@@ -65,7 +66,7 @@ def run_diagnostics(
     recent: int,
     status: str | None,
     failure_category: str | None,
-    as_json: bool,
+    output_format: str,
 ) -> int:
     workspace_dir = repo or config.workspace_dir
     if run_id:
@@ -74,8 +75,16 @@ def run_diagnostics(
             print(f"No execution metrics artifact found for {run_id} in {workspace_dir}")
             return 1
 
-        if as_json:
-            print(json.dumps(metrics, indent=2, ensure_ascii=True))
+        if output_format != "text":
+            _print_export_output(
+                latest_metrics=metrics,
+                latest_path=metrics_path,
+                metrics_entries=[(metrics, metrics_path)],
+                trend=build_execution_metrics_trend([(metrics, metrics_path)]),
+                output_format=output_format,
+                filters={"status": status, "failure_category": failure_category},
+                single_run=True,
+            )
             return 0
 
         _print_single_run_diagnostics(metrics, metrics_path)
@@ -98,21 +107,15 @@ def run_diagnostics(
 
     latest_metrics, latest_path = metrics_entries[0]
     trend = build_execution_metrics_trend(metrics_entries)
-    if as_json:
-        print(
-            json.dumps(
-                {
-                    "latest": latest_metrics,
-                    "latest_path": latest_path,
-                    "filters": {"status": status, "failure_category": failure_category},
-                    "recent_runs": [
-                        {"metrics": metrics, "path": path} for metrics, path in metrics_entries
-                    ],
-                    "trend": trend,
-                },
-                indent=2,
-                ensure_ascii=True,
-            )
+    if output_format != "text":
+        _print_export_output(
+            latest_metrics=latest_metrics,
+            latest_path=latest_path,
+            metrics_entries=metrics_entries,
+            trend=trend,
+            output_format=output_format,
+            filters={"status": status, "failure_category": failure_category},
+            single_run=False,
         )
         return 0
 
@@ -274,6 +277,72 @@ def _filter_metrics_entries(
     return filtered_entries
 
 
+def _print_export_output(
+    *,
+    latest_metrics: dict,
+    latest_path: str,
+    metrics_entries: list[tuple[dict, str]],
+    trend: dict,
+    output_format: str,
+    filters: dict[str, str | None],
+    single_run: bool,
+) -> None:
+    payload = {
+        "latest": latest_metrics,
+        "latest_path": latest_path,
+        "filters": filters,
+        "recent_runs": [
+            {"metrics": metrics, "path": path} for metrics, path in metrics_entries
+        ],
+        "trend": trend,
+    }
+    if output_format == "json":
+        if single_run:
+            print(json.dumps(latest_metrics, indent=2, ensure_ascii=True))
+            return
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
+        return
+    if output_format == "ndjson":
+        for metrics, path in metrics_entries:
+            print(json.dumps(_diagnostics_row(metrics, path), ensure_ascii=True))
+        return
+    if output_format == "rows":
+        print("run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        for metrics, path in metrics_entries:
+            row = _diagnostics_row(metrics, path)
+            print(
+                "\t".join(
+                    str(row[key])
+                    for key in [
+                        "run_id",
+                        "status",
+                        "primary_failure",
+                        "duration_ms",
+                        "testing_duration_ms",
+                        "terminal_node",
+                        "path",
+                    ]
+                )
+            )
+        return
+    raise ValueError(f"Unsupported diagnostics output format: {output_format}")
+
+
+def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
+    workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    return {
+        "run_id": metrics.get("run_id") or "",
+        "status": workflow.get("status") or "",
+        "primary_failure": failures.get("primary_category") or "",
+        "duration_ms": workflow.get("duration_ms") or 0,
+        "testing_duration_ms": testing.get("total_duration_ms") or 0,
+        "terminal_node": workflow.get("terminal_node") or "",
+        "path": path,
+    }
+
+
 def cli(argv: list[str] | None = None):
     """Main CLI entrypoint for the AI Code Agent."""
     args = parse_args(argv)
@@ -283,6 +352,7 @@ def cli(argv: list[str] | None = None):
     if args.command == "health":
         return run_health_check(config, getattr(args, "role", None), getattr(args, "json", False))
     if args.command == "diagnose":
+        output_format = "json" if getattr(args, "json", False) and getattr(args, "format", "text") == "text" else getattr(args, "format", "text")
         return run_diagnostics(
             config,
             getattr(args, "repo", None),
@@ -290,7 +360,7 @@ def cli(argv: list[str] | None = None):
             getattr(args, "recent", 5),
             getattr(args, "status", None),
             getattr(args, "failure_category", None),
-            getattr(args, "json", False),
+            output_format,
         )
 
     print(f"Starting AI Agent for issue: {args.issue}")
