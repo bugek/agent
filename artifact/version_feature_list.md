@@ -113,6 +113,13 @@ Exit Criteria:
 
 เป้าหมาย: ยกระดับจาก “generate ได้” เป็น “หน้าตาดีและใช้ได้จริง”
 
+Current progress:
+1. Started
+2. Deterministic Next.js scaffolding now emits stronger visual direction instead of plain placeholder sections.
+3. Generated Next.js components now cover `loading`, `empty`, `error`, and `ready` states.
+4. App Router page scaffolding now emits companion `loading.tsx` and `error.tsx` files when applicable.
+5. Unit tests cover frontend-quality templates directly.
+
 Features:
 1. UI design direction input
 2. Design token generation

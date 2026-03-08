@@ -22,6 +22,7 @@ Return a valid JSON object containing:
 - "insert_lines" requires "line_number" and "content".
 - Only propose replacements when the exact search text exists in the provided file content.
 - If the workspace_profile indicates Next.js, prefer route-aware operations that match App Router or Pages Router conventions.
+- For frontend work, include meaningful visual direction and cover loading, empty, error, and success states where the surface warrants it.
 - When the deterministic Next.js scaffold path can satisfy the request, keep generated operations minimal and framework-consistent.
 """
 

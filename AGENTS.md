@@ -121,6 +121,7 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - The tester can prefer Next.js-specific lint, typecheck, and build validation paths when a Next.js workspace is detected.
 - The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
+- The Next.js deterministic scaffold path has started a frontend quality layer with design-direction-aware templates, App Router `loading.tsx` and `error.tsx` generation, and built-in loading/empty/error/success state coverage for generated components.
 - The coder can deterministically scaffold NestJS modules, controllers, services, DTOs, and root module registration for common backend feature requests.
 
 ## Evaluation Artifacts

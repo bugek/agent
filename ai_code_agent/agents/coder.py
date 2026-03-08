@@ -204,7 +204,7 @@ class CoderAgent(BaseAgent):
                 self._file_operation(
                     editor,
                     component_file,
-                    self._next_component_template(component_request or "Feature Section"),
+                    self._next_component_template(component_request or "Feature Section", issue, route_slug),
                     preferred_action=action,
                 )
             )
@@ -216,10 +216,24 @@ class CoderAgent(BaseAgent):
                     self._file_operation(
                         editor,
                         page_file,
-                        self._next_page_template(page_file, route_slug, component_file, component_request),
+                        self._next_page_template(page_file, route_slug, component_file, component_request, issue),
                         preferred_action=action,
                     )
                 )
+                if nextjs_profile.get("router_type") == "app":
+                    for special_file, template in [
+                        (self._resolve_next_special_file(nextjs_profile, route_slug, "loading.tsx"), self._next_loading_template(issue, route_slug)),
+                        (self._resolve_next_special_file(nextjs_profile, route_slug, "error.tsx"), self._next_error_template(issue, route_slug)),
+                    ]:
+                        if special_file is not None:
+                            operations.append(
+                                self._file_operation(
+                                    editor,
+                                    special_file,
+                                    template,
+                                    preferred_action=action,
+                                )
+                            )
 
         if wants_layout:
             layout_file = self._resolve_next_layout_file(nextjs_profile, route_slug)
@@ -228,7 +242,7 @@ class CoderAgent(BaseAgent):
                     self._file_operation(
                         editor,
                         layout_file,
-                        self._next_layout_template(route_slug),
+                        self._next_layout_template(route_slug, issue),
                         preferred_action=action,
                     )
                 )
@@ -454,68 +468,254 @@ class CoderAgent(BaseAgent):
             return f"{pages_dir}/api/{route_slug}.ts"
         return None
 
+    def _resolve_next_special_file(self, nextjs_profile: dict[str, Any], route_slug: str, file_name: str) -> str | None:
+        if nextjs_profile.get("router_type") != "app":
+            return None
+        app_dir = nextjs_profile.get("app_dir") or "app"
+        return f"{app_dir}/{route_slug}/{file_name}" if route_slug else f"{app_dir}/{file_name}"
+
     def _next_page_template(
         self,
         page_file: str,
         route_slug: str,
         component_file: str | None,
         component_request: str | None,
+        issue: str,
     ) -> str:
         page_name = self._humanize_identifier(route_slug or "home")
         component_name = self._to_component_name(component_request or f"{page_name} section")
+        design = self._next_design_direction(issue, route_slug or component_request or page_name)
         imports = []
         body_lines = [
-            "    <main>",
-            f"      <h1>{page_name}</h1>",
-            f"      <p>{page_name} experience scaffolded by AI Code Agent.</p>",
+            "    <main style={pageStyles.shell}>",
+            "      <section style={pageStyles.hero}>",
+            f"        <p style={{pageStyles.eyebrow}}>{design['eyebrow']}</p>",
+            f"        <h1 style={{pageStyles.title}}>{page_name}</h1>",
+            f"        <p style={{pageStyles.description}}>{design['description']}</p>",
+            "      </section>",
         ]
         if component_file is not None:
             import_path = self._relative_import(page_file, component_file)
             imports.append(f'import {{ {component_name} }} from "{import_path}";')
-            body_lines.append(f"      <{component_name} />")
+            body_lines.append(f"      <{component_name} state=\"ready\" items={{previewItems}} />")
         body_lines.append("    </main>")
 
         import_block = "\n".join(imports)
         if import_block:
             import_block += "\n\n"
         return (
-            f"{import_block}export default function {self._to_component_name(page_name)}Page() {{\n"
+            f"{import_block}const previewItems = [\n"
+            f"  {{ label: \"Primary signal\", value: \"{design['primary_metric']}\", detail: \"{design['metric_caption']}\" }},\n"
+            f"  {{ label: \"Momentum\", value: \"{design['secondary_metric']}\", detail: \"{design['secondary_caption']}\" }},\n"
+            "];\n\n"
+            "const pageStyles = {\n"
+            f"  shell: {{ minHeight: \"100vh\", padding: \"4rem 1.5rem\", background: \"{design['background']}\", color: \"{design['text']}\" }},\n"
+            f"  hero: {{ maxWidth: \"56rem\", margin: \"0 auto 2rem\", padding: \"2rem\", borderRadius: \"28px\", background: \"{design['panel']}\", boxShadow: \"0 24px 60px rgba(15, 23, 42, 0.12)\" }},\n"
+            f"  eyebrow: {{ margin: 0, textTransform: \"uppercase\", letterSpacing: \"0.18em\", fontSize: \"0.72rem\", color: \"{design['accent']}\" }},\n"
+            "  title: { margin: \"0.75rem 0 0\", fontSize: \"clamp(2.5rem, 6vw, 4.75rem)\", lineHeight: 0.95 },\n"
+            f"  description: {{ maxWidth: \"42rem\", margin: \"1rem 0 0\", fontSize: \"1.05rem\", color: \"{design['muted']}\" }},\n"
+            "};\n\n"
+            f"export default function {self._to_component_name(page_name)}Page() {{\n"
             "  return (\n"
             + "\n".join(body_lines)
             + "\n  );\n"
             "}\n"
         )
 
-    def _next_layout_template(self, route_slug: str) -> str:
+    def _next_layout_template(self, route_slug: str, issue: str) -> str:
         section_name = self._humanize_identifier(route_slug or "app")
+        design = self._next_design_direction(issue, route_slug or section_name)
         return (
             'import type { ReactNode } from "react";\n\n'
             "type LayoutProps = {\n"
             "  children: ReactNode;\n"
             "};\n\n"
+            "const layoutStyles = {\n"
+            f"  shell: {{ minHeight: \"100vh\", background: \"{design['background']}\", color: \"{design['text']}\" }},\n"
+            f"  header: {{ maxWidth: \"72rem\", margin: \"0 auto\", padding: \"1.5rem 1.5rem 0\" }},\n"
+            f"  eyebrow: {{ margin: 0, textTransform: \"uppercase\", letterSpacing: \"0.18em\", fontSize: \"0.72rem\", color: \"{design['accent']}\" }},\n"
+            "  title: { margin: \"0.35rem 0 0\", fontSize: \"1.5rem\" },\n"
+            "  content: { maxWidth: \"72rem\", margin: \"0 auto\", padding: \"1.5rem\" },\n"
+            "};\n\n"
             f"export default function {self._to_component_name(section_name)}Layout({{ children }}: LayoutProps) {{\n"
             "  return (\n"
-            "    <section>\n"
-            f"      <header><h1>{section_name}</h1></header>\n"
-            "      <div>{children}</div>\n"
+            "    <section style={layoutStyles.shell}>\n"
+            "      <header style={layoutStyles.header}>\n"
+            f"        <p style={{layoutStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h1 style={{layoutStyles.title}}>{section_name}</h1>\n"
+            "      </header>\n"
+            "      <div style={layoutStyles.content}>{children}</div>\n"
             "    </section>\n"
             "  );\n"
             "}\n"
         )
 
-    def _next_component_template(self, component_request: str) -> str:
+    def _next_component_template(self, component_request: str, issue: str, route_slug: str) -> str:
         component_name = self._to_component_name(component_request)
         title = self._humanize_identifier(component_request)
+        design = self._next_design_direction(issue, route_slug or component_request)
         return (
-            f"export function {component_name}() {{\n"
+            f"type {component_name}State = \"loading\" | \"empty\" | \"error\" | \"ready\";\n\n"
+            f"type {component_name}Item = {{\n"
+            "  label: string;\n"
+            "  value: string;\n"
+            "  detail?: string;\n"
+            "};\n\n"
+            f"type {component_name}Props = {{\n"
+            f"  state?: {component_name}State;\n"
+            f"  items?: {component_name}Item[];\n"
+            "};\n\n"
+            "const sectionStyles = {\n"
+            f"  shell: {{ borderRadius: \"28px\", padding: \"1.5rem\", background: \"{design['panel']}\", color: \"{design['text']}\", boxShadow: \"0 24px 60px rgba(15, 23, 42, 0.12)\" }},\n"
+            f"  eyebrow: {{ margin: 0, textTransform: \"uppercase\", letterSpacing: \"0.16em\", fontSize: \"0.72rem\", color: \"{design['accent']}\" }},\n"
+            "  title: { margin: \"0.5rem 0 0\", fontSize: \"1.5rem\" },\n"
+            f"  description: {{ margin: \"0.75rem 0 0\", color: \"{design['muted']}\" }},\n"
+            "  grid: { display: \"grid\", gap: \"1rem\", gridTemplateColumns: \"repeat(auto-fit, minmax(12rem, 1fr))\", marginTop: \"1.5rem\" },\n"
+            f"  card: {{ padding: \"1rem\", borderRadius: \"20px\", background: \"{design['surface']}\" }},\n"
+            f"  value: {{ margin: \"0.35rem 0 0\", fontSize: \"1.9rem\", color: \"{design['text']}\" }},\n"
+            f"  detail: {{ margin: \"0.5rem 0 0\", color: \"{design['muted']}\", fontSize: \"0.95rem\" }},\n"
+            f"  statePanel: {{ marginTop: \"1.5rem\", padding: \"1.25rem\", borderRadius: \"20px\", background: \"{design['surface']}\", color: \"{design['muted']}\" }},\n"
+            "};\n\n"
+            f"export function {component_name}({{ state = \"ready\", items = [] }}: {component_name}Props) {{\n"
+            "  if (state === \"loading\") {\n"
+            "    return (\n"
+            "      <section style={sectionStyles.shell}>\n"
+            f"        <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"        <p style={{sectionStyles.description}}>{design['loading_copy']}</p>\n"
+            "      </section>\n"
+            "    );\n"
+            "  }\n\n"
+            f"  if (state === \"error\") {{\n"
+            "    return (\n"
+            "      <section style={sectionStyles.shell}>\n"
+            f"        <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"        <div style={{sectionStyles.statePanel}}>{design['error_copy']}</div>\n"
+            "      </section>\n"
+            "    );\n"
+            "  }\n\n"
+            "  if (state === \"empty\" || items.length === 0) {\n"
+            "    return (\n"
+            "      <section style={sectionStyles.shell}>\n"
+            f"        <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"        <div style={{sectionStyles.statePanel}}>{design['empty_copy']}</div>\n"
+            "      </section>\n"
+            "    );\n"
+            "  }\n\n"
             "  return (\n"
-            "    <section>\n"
-            f"      <h2>{title}</h2>\n"
-            f"      <p>{title} content scaffolded by AI Code Agent.</p>\n"
+            "    <section style={sectionStyles.shell}>\n"
+            f"      <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"      <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"      <p style={{sectionStyles.description}}>{design['success_copy']}</p>\n"
+            "      <div style={sectionStyles.grid}>\n"
+            "        {items.map((item) => (\n"
+            "          <article key={item.label} style={sectionStyles.card}>\n"
+            "            <p style={sectionStyles.eyebrow}>{item.label}</p>\n"
+            "            <p style={sectionStyles.value}>{item.value}</p>\n"
+            "            {item.detail ? <p style={sectionStyles.detail}>{item.detail}</p> : null}\n"
+            "          </article>\n"
+            "        ))}\n"
+            "      </div>\n"
             "    </section>\n"
             "  );\n"
             "}\n"
         )
+
+    def _next_loading_template(self, issue: str, route_slug: str) -> str:
+        design = self._next_design_direction(issue, route_slug or "feature")
+        return (
+            "export default function Loading() {\n"
+            "  return (\n"
+            f"    <div style={{{{ minHeight: \"40vh\", display: \"grid\", placeItems: \"center\", padding: \"2rem\", borderRadius: \"24px\", background: \"{design['panel']}\", color: \"{design['muted']}\" }}}}>\n"
+            f"      <p>{design['loading_copy']}</p>\n"
+            "    </div>\n"
+            "  );\n"
+            "}\n"
+        )
+
+    def _next_error_template(self, issue: str, route_slug: str) -> str:
+        design = self._next_design_direction(issue, route_slug or "feature")
+        return (
+            '"use client";\n\n'
+            'type ErrorProps = {\n'
+            '  error: Error;\n'
+            '  reset: () => void;\n'
+            '};\n\n'
+            "export default function ErrorBoundary({ error, reset }: ErrorProps) {\n"
+            "  return (\n"
+            f"    <div style={{{{ padding: \"2rem\", borderRadius: \"24px\", background: \"{design['panel']}\", color: \"{design['text']}\" }}}}>\n"
+            f"      <h2>{design['error_title']}</h2>\n"
+            f"      <p style={{{{ color: \"{design['muted']}\" }}}}>{design['error_copy']}</p>\n"
+            '      <p style={{ color: "#b91c1c" }}>{error.message}</p>\n'
+            '      <button type="button" onClick={reset} style={{ marginTop: "1rem" }}>Try again</button>\n'
+            "    </div>\n"
+            "  );\n"
+            "}\n"
+        )
+
+    def _next_design_direction(self, issue: str, context_hint: str) -> dict[str, str]:
+        lower_issue = f"{issue} {context_hint}".lower()
+        if re.search(r"\b(dashboard|analytics|metric|report|signal)\b", lower_issue):
+            return {
+                "eyebrow": "Signal-rich dashboard",
+                "description": "A bold control room layout with clear hierarchy, warm surfaces, and decisive contrast.",
+                "background": "linear-gradient(180deg, #f5efe4 0%, #ebe4d8 100%)",
+                "panel": "#fffaf0",
+                "surface": "#f0e7d8",
+                "accent": "#0f766e",
+                "text": "#1f2937",
+                "muted": "#5b6470",
+                "primary_metric": "$128k",
+                "secondary_metric": "+18%",
+                "metric_caption": "Net uplift since the last release window.",
+                "secondary_caption": "Week-on-week momentum across the main surface.",
+                "loading_copy": "Loading the latest signals and arranging the board.",
+                "empty_copy": "No highlights are available yet. Connect a data source or publish the first event.",
+                "error_title": "Something interrupted the signal feed",
+                "error_copy": "The page is intact, but the live content could not be refreshed just now.",
+                "success_copy": "Designed to surface the strongest numbers first while still leaving room for narrative context.",
+            }
+        if re.search(r"\b(login|auth|profile|account|setting)\b", lower_issue):
+            return {
+                "eyebrow": "Calm product surface",
+                "description": "A restrained layout with soft contrast, deliberate spacing, and a calmer tone for high-focus flows.",
+                "background": "linear-gradient(180deg, #f3f7f6 0%, #e6efec 100%)",
+                "panel": "#ffffff",
+                "surface": "#eef6f4",
+                "accent": "#0f766e",
+                "text": "#16302b",
+                "muted": "#56716a",
+                "primary_metric": "Ready",
+                "secondary_metric": "Secure",
+                "metric_caption": "Primary account action is available.",
+                "secondary_caption": "Access and profile controls are in sync.",
+                "loading_copy": "Preparing the workspace and verifying account context.",
+                "empty_copy": "There is nothing to show yet. Start by adding the first account detail.",
+                "error_title": "We could not finish setting up this view",
+                "error_copy": "The shell loaded correctly, but a critical account detail failed to arrive.",
+                "success_copy": "Built for focus-heavy product flows with clear copy and generous breathing room.",
+            }
+        return {
+            "eyebrow": "Editorial product surface",
+            "description": "A modern product page with higher contrast, stronger typography, and clear state transitions.",
+            "background": "linear-gradient(180deg, #f6f1ea 0%, #e8ddd0 100%)",
+            "panel": "#fffaf5",
+            "surface": "#f1e4d4",
+            "accent": "#b45309",
+            "text": "#2f241c",
+            "muted": "#6b5a4a",
+            "primary_metric": "24 live",
+            "secondary_metric": "4 queues",
+            "metric_caption": "Primary content is surfaced above the fold.",
+            "secondary_caption": "Supporting actions stay visible without crowding the layout.",
+            "loading_copy": "Preparing the surface and staging the first interaction states.",
+            "empty_copy": "This section is ready, but it has no content yet. Add the first record to bring it to life.",
+            "error_title": "This section needs another pass",
+            "error_copy": "The shell is present, but the content layer hit an unexpected error.",
+            "success_copy": "Structured for a more intentional first impression than a plain scaffold.",
+        }
 
     def _next_api_route_template(self, nextjs_profile: dict[str, Any], route_slug: str) -> str:
         route_name = route_slug or "status"
