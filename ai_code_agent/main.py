@@ -30,6 +30,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     diagnose_parser.add_argument("--repo", type=str, required=False, help="Local path to the repository workspace")
     diagnose_parser.add_argument("--run-id", type=str, required=False, help="Specific run id to inspect")
     diagnose_parser.add_argument("--recent", type=int, default=5, help="Number of recent runs to include when summarizing without --run-id")
+    diagnose_parser.add_argument("--status", choices=["approved", "failed", "aborted", "changes_required"], help="Filter recent runs by workflow status")
+    diagnose_parser.add_argument("--failure-category", type=str, required=False, help="Filter recent runs by primary failure category")
     diagnose_parser.add_argument("--json", action="store_true", help="Print the metrics artifact as JSON")
 
     if not arguments or arguments[0].startswith("-"):
@@ -56,7 +58,15 @@ def run_health_check(config: AgentConfig, role: str | None, as_json: bool) -> in
     return 0 if report["ok"] else 1
 
 
-def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, recent: int, as_json: bool) -> int:
+def run_diagnostics(
+    config: AgentConfig,
+    repo: str | None,
+    run_id: str | None,
+    recent: int,
+    status: str | None,
+    failure_category: str | None,
+    as_json: bool,
+) -> int:
     workspace_dir = repo or config.workspace_dir
     if run_id:
         metrics, metrics_path = load_execution_metrics_artifact(workspace_dir, run_id)
@@ -71,9 +81,19 @@ def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, r
         _print_single_run_diagnostics(metrics, metrics_path)
         return 0
 
-    metrics_entries = list_execution_metrics_artifacts(workspace_dir, limit=recent)
+    metrics_entries = _filter_metrics_entries(
+        list_execution_metrics_artifacts(workspace_dir, limit=max(recent * 5, recent)),
+        status=status,
+        failure_category=failure_category,
+    )[: max(1, recent)]
     if not metrics_entries:
-        print(f"No execution metrics artifact found for latest run in {workspace_dir}")
+        filter_parts: list[str] = []
+        if status:
+            filter_parts.append(f"status={status}")
+        if failure_category:
+            filter_parts.append(f"failure_category={failure_category}")
+        filter_suffix = f" matching {' '.join(filter_parts)}" if filter_parts else ""
+        print(f"No execution metrics artifact found for latest run in {workspace_dir}{filter_suffix}")
         return 1
 
     latest_metrics, latest_path = metrics_entries[0]
@@ -84,6 +104,7 @@ def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, r
                 {
                     "latest": latest_metrics,
                     "latest_path": latest_path,
+                    "filters": {"status": status, "failure_category": failure_category},
                     "recent_runs": [
                         {"metrics": metrics, "path": path} for metrics, path in metrics_entries
                     ],
@@ -96,6 +117,18 @@ def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, r
         return 0
 
     _print_single_run_diagnostics(latest_metrics, latest_path)
+    if status or failure_category:
+        print(
+            "Applied filters: "
+            + ", ".join(
+                part
+                for part in [
+                    f"status={status}" if status else None,
+                    f"failure_category={failure_category}" if failure_category else None,
+                ]
+                if part
+            )
+        )
     print(f"Recent runs analyzed: {trend['run_count']}")
     print(f"Comparable runs: {trend['comparable_run_count']}")
     print(f"Approved runs: {trend['approved_count']}")
@@ -187,6 +220,29 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     print(f"Residual risks: {review.get('residual_risk_count')}")
 
 
+def _filter_metrics_entries(
+    metrics_entries: list[tuple[dict, str]],
+    *,
+    status: str | None,
+    failure_category: str | None,
+) -> list[tuple[dict, str]]:
+    normalized_failure_category = failure_category.casefold() if isinstance(failure_category, str) else None
+    filtered_entries: list[tuple[dict, str]] = []
+    for metrics, path in metrics_entries:
+        workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+        failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+        workflow_status = workflow.get("status")
+        primary_category = failures.get("primary_category")
+        if status and workflow_status != status:
+            continue
+        if normalized_failure_category and (
+            not isinstance(primary_category, str) or primary_category.casefold() != normalized_failure_category
+        ):
+            continue
+        filtered_entries.append((metrics, path))
+    return filtered_entries
+
+
 def cli(argv: list[str] | None = None):
     """Main CLI entrypoint for the AI Code Agent."""
     args = parse_args(argv)
@@ -201,6 +257,8 @@ def cli(argv: list[str] | None = None):
             getattr(args, "repo", None),
             getattr(args, "run_id", None),
             getattr(args, "recent", 5),
+            getattr(args, "status", None),
+            getattr(args, "failure_category", None),
             getattr(args, "json", False),
         )
 

@@ -14,12 +14,27 @@ from ai_code_agent.metrics import persist_execution_metrics
 
 class MainCliTest(unittest.TestCase):
     def test_parse_args_supports_diagnose_command(self) -> None:
-        args = parse_args(["diagnose", "--repo", "workspace", "--run-id", "run-123", "--recent", "7", "--json"])
+        args = parse_args([
+            "diagnose",
+            "--repo",
+            "workspace",
+            "--run-id",
+            "run-123",
+            "--recent",
+            "7",
+            "--status",
+            "failed",
+            "--failure-category",
+            "validation",
+            "--json",
+        ])
 
         self.assertEqual(args.command, "diagnose")
         self.assertEqual(args.repo, "workspace")
         self.assertEqual(args.run_id, "run-123")
         self.assertEqual(args.recent, 7)
+        self.assertEqual(args.status, "failed")
+        self.assertEqual(args.failure_category, "validation")
         self.assertTrue(args.json)
 
     def test_run_diagnostics_prints_latest_metrics_summary(self) -> None:
@@ -40,7 +55,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 5, False)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 5, None, None, False)
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -58,7 +73,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), temp_dir, "run-123", 5, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), temp_dir, "run-123", 5, None, None, True)
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(json.loads(output.getvalue()), metrics)
@@ -98,7 +113,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, False)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, False)
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -165,7 +180,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, True)
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
@@ -224,7 +239,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, None, None, True)
 
             self.assertEqual(exit_code, 0)
             payload = json.loads(output.getvalue())
@@ -241,6 +256,86 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_direction"], "regressed")
             self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["previous_run_id"], "run-1")
             self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["duration_ms_direction"], "regressed")
+
+    def test_run_diagnostics_filters_recent_runs_by_status_and_failure_category(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            approved_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
+                "failures": {"primary_category": "generation"},
+                "testing": {"failed_commands": [], "total_duration_ms": 20, "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+            }
+            failed_validation_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 200, "slowest_command": {"label": "script:test", "duration_ms": 150}},
+                "review": {"status": "changes_required", "residual_risk_count": 2},
+            }
+            failed_policy_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-3",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 90, "terminal_node": "test"},
+                "failures": {"primary_category": "policy"},
+                "testing": {"failed_commands": [], "total_duration_ms": 0, "slowest_command": None},
+                "review": {"status": "changes_required", "residual_risk_count": 1},
+            }
+            persist_execution_metrics(temp_dir, "run-1", approved_metrics)
+            persist_execution_metrics(temp_dir, "run-2", failed_validation_metrics)
+            persist_execution_metrics(temp_dir, "run-3", failed_policy_metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-2", "metrics.json"), (200, 200))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-3", "metrics.json"), (300, 300))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(
+                    AgentConfig(workspace_dir=temp_dir),
+                    None,
+                    None,
+                    3,
+                    "failed",
+                    "validation",
+                    True,
+                )
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["filters"], {"status": "failed", "failure_category": "validation"})
+            self.assertEqual(payload["latest"]["run_id"], "run-2")
+            self.assertEqual(len(payload["recent_runs"]), 1)
+            self.assertEqual(payload["trend"]["run_count"], 1)
+
+    def test_run_diagnostics_reports_when_filters_match_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
+                "failures": {"primary_category": "generation"},
+                "testing": {"failed_commands": [], "total_duration_ms": 20, "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+            }
+            persist_execution_metrics(temp_dir, "run-1", metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(
+                    AgentConfig(workspace_dir=temp_dir),
+                    None,
+                    None,
+                    3,
+                    "failed",
+                    "validation",
+                    False,
+                )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("matching status=failed failure_category=validation", output.getvalue())
 
 
 if __name__ == "__main__":
