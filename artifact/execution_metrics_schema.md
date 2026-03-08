@@ -254,6 +254,10 @@ The repository can implement this incrementally by first deriving `execution_met
 - `testing.sandbox_started`: whether the selected backend started successfully.
 - `testing.sandbox_fallback_reason`: fallback or failure reason when the requested backend could not be used directly.
 - `testing.validation_strategy`: `full` or `targeted_retry`.
+- `testing.retry_policy_reason`: reason the tester chose the current validation strategy.
+- `testing.retry_policy_history_source`: whether the decision came from failure-category history, overall history, or a non-history rule.
+- `testing.retry_policy_confidence`: confidence level such as `strong`, `weak`, or `limited` for the chosen strategy.
+- `testing.retry_policy_stop_reason`: reason the tester marked the current retry attempt as the last useful one if another failure occurs.
 - `testing.selected_command_count`: count of commands kept for the current validation pass.
 - `testing.skipped_command_count`: count of commands omitted on a targeted retry pass.
 - `testing.requested_retry_labels`: labels requested by remediation-aware retry selection.

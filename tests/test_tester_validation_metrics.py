@@ -40,7 +40,9 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(summary["requested_retry_labels"], ["script:build"])
         self.assertIsNone(summary["retry_policy_reason"])
         self.assertIsNone(summary["retry_policy_history_source"])
+        self.assertIsNone(summary["retry_policy_confidence"])
         self.assertEqual(summary["stop_retry_after_failure"], False)
+        self.assertIsNone(summary["retry_policy_stop_reason"])
         self.assertEqual(summary["sandbox_requested_mode"], "auto")
         self.assertEqual(summary["sandbox_mode"], "local")
         self.assertEqual(summary["sandbox_started"], True)
@@ -83,7 +85,9 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertIn("script:build", plan["skipped_labels"])
         self.assertEqual(plan["policy_reason"], "default_targeted_retry")
         self.assertIsNone(plan["history_source"])
+        self.assertIsNone(plan["policy_confidence"])
         self.assertEqual(plan["stop_retry_after_failure"], False)
+        self.assertIsNone(plan["stop_reason"])
 
     def test_build_validation_plan_falls_back_to_full_without_retry_signals(self) -> None:
         workspace_profile = {
@@ -136,7 +140,9 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(plan["strategy"], "full")
         self.assertEqual(plan["policy_reason"], "fallback_to_full_after_targeted_retry")
         self.assertEqual(plan["history_source"], "previous_attempt")
+        self.assertEqual(plan["policy_confidence"], "strong")
         self.assertEqual(plan["stop_retry_after_failure"], True)
+        self.assertEqual(plan["stop_reason"], "failed_targeted_retry_then_full_fallback")
 
     def test_build_validation_plan_prefers_full_when_history_is_stronger(self) -> None:
         workspace_profile = {
@@ -210,7 +216,85 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(plan["strategy"], "full")
         self.assertEqual(plan["policy_reason"], "history_prefers_full")
         self.assertEqual(plan["history_source"], "failure_category")
+        self.assertEqual(plan["policy_confidence"], "strong")
+        self.assertEqual(plan["stop_retry_after_failure"], False)
         self.assertEqual(plan["selected_labels"], ["package-install", "script:lint", "script:build", "script:test", "next:router-detected"])
+
+    def test_build_validation_plan_stops_after_low_recovery_history(self) -> None:
+        workspace_profile = {
+            "has_python": False,
+            "has_package_json": True,
+            "needs_install": True,
+            "package_manager": "npm",
+            "frameworks": ["nextjs"],
+            "scripts": ["lint", "build", "test"],
+            "nextjs": {"router_type": "app"},
+            "lockfiles": ["package-lock.json"],
+        }
+        history_entries = [
+            (
+                {
+                    "run_id": "hist-1",
+                    "workflow": {"attempt_count": 2, "status": "failed"},
+                    "testing": {"validation_strategy": "full", "total_duration_ms": 300},
+                    "failures": {"primary_category": "validation"},
+                },
+                ".ai-code-agent/runs/hist-1/metrics.json",
+            ),
+            (
+                {
+                    "run_id": "hist-2",
+                    "workflow": {"attempt_count": 2, "status": "failed"},
+                    "testing": {"validation_strategy": "full", "total_duration_ms": 320},
+                    "failures": {"primary_category": "validation"},
+                },
+                ".ai-code-agent/runs/hist-2/metrics.json",
+            ),
+            (
+                {
+                    "run_id": "hist-3",
+                    "workflow": {"attempt_count": 2, "status": "failed"},
+                    "testing": {"validation_strategy": "targeted_retry", "total_duration_ms": 140},
+                    "failures": {"primary_category": "validation"},
+                },
+                ".ai-code-agent/runs/hist-3/metrics.json",
+            ),
+            (
+                {
+                    "run_id": "hist-4",
+                    "workflow": {"attempt_count": 2, "status": "failed"},
+                    "testing": {"validation_strategy": "targeted_retry", "total_duration_ms": 130},
+                    "failures": {"primary_category": "validation"},
+                },
+                ".ai-code-agent/runs/hist-4/metrics.json",
+            ),
+        ]
+
+        with patch("ai_code_agent.agents.tester.list_execution_metrics_artifacts", return_value=history_entries):
+            plan = self.agent._build_validation_plan(
+                {
+                    "workspace_dir": ".",
+                    "run_id": "run-current",
+                    "retry_count": 1,
+                    "execution_metrics": {"failures": {"primary_category": "validation"}},
+                    "testing_summary": {"failed_commands": ["script:test"]},
+                    "review_summary": {
+                        "status": "changes_required",
+                        "remediation": {
+                            "required": True,
+                            "failed_validation_labels": ["script:test"],
+                        },
+                    },
+                },
+                workspace_profile,
+            )
+
+        self.assertEqual(plan["strategy"], "targeted_retry")
+        self.assertEqual(plan["policy_reason"], "history_prefers_targeted_retry")
+        self.assertEqual(plan["history_source"], "failure_category")
+        self.assertEqual(plan["policy_confidence"], "weak")
+        self.assertEqual(plan["stop_retry_after_failure"], True)
+        self.assertEqual(plan["stop_reason"], "history_low_recovery_probability")
 
 
 if __name__ == "__main__":

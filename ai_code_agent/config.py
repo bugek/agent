@@ -60,3 +60,5 @@ class AgentConfig:
     max_retries: int = int(os.getenv("MAX_RETRIES", "3"))
     retry_history_window: int = int(os.getenv("RETRY_HISTORY_WINDOW", "10"))
     retry_policy_min_samples: int = int(os.getenv("RETRY_POLICY_MIN_SAMPLES", "2"))
+    retry_policy_min_confidence_gap: float = float(os.getenv("RETRY_POLICY_MIN_CONFIDENCE_GAP", "0.15"))
+    retry_policy_stop_success_rate: float = float(os.getenv("RETRY_POLICY_STOP_SUCCESS_RATE", "0.25"))

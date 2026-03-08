@@ -160,7 +160,9 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
                 "requested_retry_labels": ["script:test"],
                 "retry_policy_reason": "default_targeted_retry",
                 "retry_policy_history_source": None,
+                "retry_policy_confidence": "weak",
                 "stop_retry_after_failure": False,
+                "retry_policy_stop_reason": None,
             },
             "visual_review": None,
         }
@@ -233,7 +235,9 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["requested_retry_count"], 1)
         self.assertEqual(event["details"]["retry_policy_reason"], "default_targeted_retry")
         self.assertEqual(event["details"]["retry_policy_history_source"], None)
+        self.assertEqual(event["details"]["retry_policy_confidence"], "weak")
         self.assertEqual(event["details"]["stop_retry_after_failure"], False)
+        self.assertEqual(event["details"]["retry_policy_stop_reason"], None)
         self.assertEqual(result["execution_metrics"]["testing"]["status"], "failed")
 
     def test_should_continue_stops_after_full_fallback_failure(self) -> None:

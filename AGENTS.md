@@ -15,7 +15,7 @@ Current status:
 3. Next.js and NestJS workflows are supported with committed smoke fixtures and full validation coverage.
 4. Retrieval is hybrid and explainable through candidate reasons, explanation edges, graph seed files, and structured `edit_intent`.
 5. Review-driven remediation, tester `targeted_retry`, adaptive retry-policy selection from recent run history, and retry-effectiveness diagnostics are implemented and validated.
-6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, retry recovery reporting, and provider-aware issue/PR workflow publishing.
+6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, retry recovery reporting, provider-aware issue/PR workflow publishing, and richer retry-policy stop decisions based on recent run history.
 
 Future:
 
@@ -147,7 +147,7 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 - The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
 - Sandbox backend selection now supports `auto`, `docker`, `local`, and `docker_required`; tester summaries and execution metrics record the requested backend, resolved backend, and fallback reason when Docker is unavailable or the image is missing.
 - The tester can switch to a `targeted_retry` validation strategy on remediation loops, using prior failed validation labels, failed commands, and visual-review blockers to reduce rerun cost while preserving relevant checks.
-- The tester can also consult recent `execution_metrics` history on retry attempts to choose between `targeted_retry` and `full`, and can tell the orchestrator to stop after a failed full fallback when another loop is unlikely to help.
+- The tester can also consult recent `execution_metrics` history on retry attempts to choose between `targeted_retry` and `full`, record policy confidence and stop reasons, and tell the orchestrator to stop after a failed attempt when history shows low recovery probability or another loop is unlikely to help.
 - The execution metrics layer now captures remediation effectiveness signals such as retry recovery, remediation-assisted recovery, edit-intent-assisted recovery, skipped-command totals, and command reduction rates for targeted retries.
 - GitHub issue URLs passed to `ai-code-agent run --issue ...` can now be resolved into issue title/body/recent comments, and successful auto-push runs can open a GitHub PR plus comment back on the source issue when `GITHUB_TOKEN` and repo settings are present.
 - Azure DevOps work item URLs passed to `ai-code-agent run --issue ...` can now be resolved into work item title/description/recent comments, and successful auto-push runs can open an Azure Repos PR plus comment back on the source work item when ADO credentials and repo settings are present.

@@ -240,7 +240,9 @@ def test_node(state: AgentState) -> dict[str, Any]:
             "requested_retry_count": len(result.get("testing_summary", {}).get("requested_retry_labels", [])),
             "retry_policy_reason": result.get("testing_summary", {}).get("retry_policy_reason"),
             "retry_policy_history_source": result.get("testing_summary", {}).get("retry_policy_history_source"),
+            "retry_policy_confidence": result.get("testing_summary", {}).get("retry_policy_confidence"),
             "stop_retry_after_failure": bool(result.get("testing_summary", {}).get("stop_retry_after_failure", False)),
+            "retry_policy_stop_reason": result.get("testing_summary", {}).get("retry_policy_stop_reason"),
         },
     )
     return _finalize_result(state, result)

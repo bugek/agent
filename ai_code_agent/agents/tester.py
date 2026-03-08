@@ -121,7 +121,9 @@ class TesterAgent(BaseAgent):
             "requested_retry_labels": validation_plan.get("requested_retry_labels", []) if isinstance(validation_plan, dict) else [],
             "retry_policy_reason": validation_plan.get("policy_reason") if isinstance(validation_plan, dict) else None,
             "retry_policy_history_source": validation_plan.get("history_source") if isinstance(validation_plan, dict) else None,
+            "retry_policy_confidence": validation_plan.get("policy_confidence") if isinstance(validation_plan, dict) else None,
             "stop_retry_after_failure": bool(validation_plan.get("stop_retry_after_failure", False)) if isinstance(validation_plan, dict) else False,
+            "retry_policy_stop_reason": validation_plan.get("stop_reason") if isinstance(validation_plan, dict) else None,
             "sandbox_requested_mode": sandbox_startup.get("requested_mode") if isinstance(sandbox_startup, dict) else None,
             "sandbox_mode": sandbox_startup.get("resolved_mode") if isinstance(sandbox_startup, dict) else (commands[0].get("mode") if commands else None),
             "sandbox_started": bool(sandbox_startup.get("started", False)) if isinstance(sandbox_startup, dict) else True,
@@ -130,7 +132,9 @@ class TesterAgent(BaseAgent):
 
     def _build_validation_plan(self, state: AgentState, workspace_profile: dict) -> dict[str, Any]:
         full_commands = self._build_validation_commands(state, workspace_profile)
-        selected_commands, requested_retry_labels, policy_reason, history_source = self._select_retry_commands(state, full_commands)
+        selection = self._select_retry_commands(state, full_commands)
+        selected_commands = selection["commands"]
+        requested_retry_labels = selection["requested_retry_labels"]
         selected_labels = [label for label, _, _, _ in selected_commands]
         full_labels = [label for label, _, _, _ in full_commands]
         skipped_labels = [label for label in full_labels if label not in selected_labels]
@@ -141,9 +145,11 @@ class TesterAgent(BaseAgent):
             "selected_labels": selected_labels,
             "skipped_labels": skipped_labels,
             "requested_retry_labels": requested_retry_labels,
-            "policy_reason": policy_reason,
-            "history_source": history_source,
-            "stop_retry_after_failure": policy_reason == "fallback_to_full_after_targeted_retry",
+            "policy_reason": selection.get("policy_reason"),
+            "history_source": selection.get("history_source"),
+            "policy_confidence": selection.get("policy_confidence"),
+            "stop_retry_after_failure": bool(selection.get("stop_retry_after_failure", False)),
+            "stop_reason": selection.get("stop_reason"),
         }
 
     def _build_validation_commands(self, state: AgentState, workspace_profile: dict) -> list[tuple[str, str, int, dict[str, str] | None]]:
@@ -166,14 +172,14 @@ class TesterAgent(BaseAgent):
         self,
         state: AgentState,
         full_commands: list[tuple[str, str, int, dict[str, str] | None]],
-    ) -> tuple[list[tuple[str, str, int, dict[str, str] | None]], list[str], str | None, str | None]:
+    ) -> dict[str, Any]:
         if int(state.get("retry_count", 0) or 0) <= 0:
-            return full_commands, [], "initial_full_validation", None
+            return self._selection_result(full_commands, [], "initial_full_validation", None, None, False, None)
 
         review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
         remediation = review_summary.get("remediation") if isinstance(review_summary.get("remediation"), dict) else {}
         if not remediation.get("required"):
-            return full_commands, [], "remediation_not_required", None
+            return self._selection_result(full_commands, [], "remediation_not_required", None, None, False, None)
 
         requested_labels = list(
             dict.fromkeys(
@@ -191,7 +197,7 @@ class TesterAgent(BaseAgent):
             )
         )
         if not requested_labels:
-            return full_commands, [], "no_retry_signals", None
+            return self._selection_result(full_commands, [], "no_retry_signals", None, None, False, None)
 
         previous_strategy = None
         prior_testing_summary = state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {}
@@ -199,7 +205,15 @@ class TesterAgent(BaseAgent):
             previous_strategy = prior_testing_summary.get("validation_strategy")
 
         if previous_strategy == "targeted_retry" and int(state.get("retry_count", 0) or 0) > 1:
-            return full_commands, requested_labels, "fallback_to_full_after_targeted_retry", "previous_attempt"
+            return self._selection_result(
+                full_commands,
+                requested_labels,
+                "fallback_to_full_after_targeted_retry",
+                "previous_attempt",
+                "strong",
+                True,
+                "failed_targeted_retry_then_full_fallback",
+            )
 
         failure_category = self._retry_failure_category(state)
         history_profile = self._historical_retry_strategy_profile(
@@ -208,7 +222,15 @@ class TesterAgent(BaseAgent):
             failure_category,
         )
         if history_profile.get("preferred_strategy") == "full":
-            return full_commands, requested_labels, "history_prefers_full", history_profile.get("source")
+            return self._selection_result(
+                full_commands,
+                requested_labels,
+                "history_prefers_full",
+                history_profile.get("source"),
+                history_profile.get("confidence"),
+                bool(history_profile.get("stop_after_failure", False)),
+                history_profile.get("stop_reason"),
+            )
 
         selected: list[tuple[str, str, int, dict[str, str] | None]] = []
         for command in full_commands:
@@ -219,7 +241,15 @@ class TesterAgent(BaseAgent):
                 selected.append(command)
 
         if not selected:
-            return full_commands, requested_labels, "requested_labels_not_available", history_profile.get("source")
+            return self._selection_result(
+                full_commands,
+                requested_labels,
+                "requested_labels_not_available",
+                history_profile.get("source"),
+                history_profile.get("confidence"),
+                bool(history_profile.get("stop_after_failure", False)),
+                history_profile.get("stop_reason"),
+            )
 
         needs_install = any(label != "compileall" and label != "cli-help" for label, _, _, _ in selected)
         package_install = next((command for command in full_commands if command[0] == "package-install"), None)
@@ -229,7 +259,35 @@ class TesterAgent(BaseAgent):
         policy_reason = "default_targeted_retry"
         if history_profile.get("preferred_strategy") == "targeted_retry":
             policy_reason = "history_prefers_targeted_retry"
-        return selected, requested_labels, policy_reason, history_profile.get("source")
+        return self._selection_result(
+            selected,
+            requested_labels,
+            policy_reason,
+            history_profile.get("source"),
+            history_profile.get("confidence"),
+            bool(history_profile.get("stop_after_failure", False)),
+            history_profile.get("stop_reason"),
+        )
+
+    def _selection_result(
+        self,
+        commands: list[tuple[str, str, int, dict[str, str] | None]],
+        requested_retry_labels: list[str],
+        policy_reason: str | None,
+        history_source: str | None,
+        policy_confidence: str | None,
+        stop_retry_after_failure: bool,
+        stop_reason: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "commands": commands,
+            "requested_retry_labels": requested_retry_labels,
+            "policy_reason": policy_reason,
+            "history_source": history_source,
+            "policy_confidence": policy_confidence,
+            "stop_retry_after_failure": stop_retry_after_failure,
+            "stop_reason": stop_reason,
+        }
 
     def _retry_failure_category(self, state: AgentState) -> str | None:
         execution_metrics = state.get("execution_metrics") if isinstance(state.get("execution_metrics"), dict) else {}
@@ -245,15 +303,33 @@ class TesterAgent(BaseAgent):
     ) -> dict[str, Any]:
         category_stats = self._collect_strategy_stats(workspace_dir, current_run_id, failure_category)
         if self._has_comparable_history(category_stats):
-            preferred_strategy = self._preferred_strategy(category_stats)
-            return {"source": "failure_category", "preferred_strategy": preferred_strategy, "stats": category_stats}
+            return self._build_history_profile(category_stats, "failure_category")
 
         overall_stats = self._collect_strategy_stats(workspace_dir, current_run_id, None)
         if self._has_comparable_history(overall_stats):
-            preferred_strategy = self._preferred_strategy(overall_stats)
-            return {"source": "overall", "preferred_strategy": preferred_strategy, "stats": overall_stats}
+            return self._build_history_profile(overall_stats, "overall")
 
-        return {"source": None, "preferred_strategy": None, "stats": overall_stats}
+        return {
+            "source": None,
+            "preferred_strategy": None,
+            "confidence": None,
+            "stop_after_failure": False,
+            "stop_reason": None,
+            "stats": overall_stats,
+        }
+
+    def _build_history_profile(self, stats: dict[str, dict[str, float | int]], source: str) -> dict[str, Any]:
+        preferred_strategy = self._preferred_strategy(stats)
+        confidence = self._strategy_confidence(stats, preferred_strategy)
+        stop_after_failure, stop_reason = self._history_stop_signal(stats, preferred_strategy)
+        return {
+            "source": source,
+            "preferred_strategy": preferred_strategy,
+            "confidence": confidence,
+            "stop_after_failure": stop_after_failure,
+            "stop_reason": stop_reason,
+            "stats": stats,
+        }
 
     def _collect_strategy_stats(
         self,
@@ -310,6 +386,33 @@ class TesterAgent(BaseAgent):
         if full_summary["average_testing_duration_ms"] < targeted_summary["average_testing_duration_ms"]:
             return "full"
         return "targeted_retry"
+
+    def _strategy_confidence(self, stats: dict[str, dict[str, float | int]], preferred_strategy: str | None) -> str | None:
+        if preferred_strategy is None:
+            return None
+        full_summary = self._strategy_summary(stats.get("full", {}))
+        targeted_summary = self._strategy_summary(stats.get("targeted_retry", {}))
+        if full_summary["run_count"] < self.config.retry_policy_min_samples or targeted_summary["run_count"] < self.config.retry_policy_min_samples:
+            return "limited"
+        success_gap = abs(float(full_summary["success_rate"]) - float(targeted_summary["success_rate"]))
+        if success_gap >= self.config.retry_policy_min_confidence_gap:
+            return "strong"
+        return "weak"
+
+    def _history_stop_signal(
+        self,
+        stats: dict[str, dict[str, float | int]],
+        preferred_strategy: str | None,
+    ) -> tuple[bool, str | None]:
+        if preferred_strategy is None:
+            return False, None
+        full_summary = self._strategy_summary(stats.get("full", {}))
+        targeted_summary = self._strategy_summary(stats.get("targeted_retry", {}))
+        if full_summary["run_count"] < self.config.retry_policy_min_samples or targeted_summary["run_count"] < self.config.retry_policy_min_samples:
+            return False, None
+        if float(full_summary["success_rate"]) <= self.config.retry_policy_stop_success_rate and float(targeted_summary["success_rate"]) <= self.config.retry_policy_stop_success_rate:
+            return True, "history_low_recovery_probability"
+        return False, None
 
     def _strategy_summary(self, bucket: dict[str, float | int]) -> dict[str, float | int]:
         run_count = _as_int(bucket.get("run_count"))

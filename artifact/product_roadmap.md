@@ -97,6 +97,7 @@ Current progress:
 4. GitHub Actions validation now publishes `.ai-code-agent` artifacts so teams can inspect validation logs, run metrics, and diagnostics snapshots from CI runs.
 5. GitHub issue and Azure DevOps work item inputs can now enrich the planning prompt, and successful auto-push runs can publish provider-specific PRs plus source-thread comments.
 6. Sandbox execution can now negotiate between `auto`, `docker`, `local`, and `docker_required`, with fallback reasons surfaced in tester summaries and execution metrics.
+7. Retry orchestration can now record policy confidence and low-recovery stop reasons, making follow-up retry loops more selective when history shows poor recovery odds.
 
 ## 12-Month Direction
 

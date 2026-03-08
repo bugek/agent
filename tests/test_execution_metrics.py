@@ -54,6 +54,10 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "total_duration_ms": 1100,
                     "slowest_command": {"label": "script:build", "exit_code": 1, "duration_ms": 980, "mode": "local", "timed_out": False},
                     "validation_strategy": "targeted_retry",
+                    "retry_policy_reason": "history_prefers_targeted_retry",
+                    "retry_policy_history_source": "failure_category",
+                    "retry_policy_confidence": "weak",
+                    "retry_policy_stop_reason": "history_low_recovery_probability",
                     "selected_command_labels": ["script:build"],
                     "skipped_command_labels": ["compileall"],
                     "requested_retry_labels": ["script:build"],
@@ -116,6 +120,10 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["sandbox_mode"], "local")
         self.assertEqual(metrics["testing"]["sandbox_started"], True)
         self.assertEqual(metrics["testing"]["sandbox_fallback_reason"], "docker_unavailable")
+        self.assertEqual(metrics["testing"]["retry_policy_reason"], "history_prefers_targeted_retry")
+        self.assertEqual(metrics["testing"]["retry_policy_history_source"], "failure_category")
+        self.assertEqual(metrics["testing"]["retry_policy_confidence"], "weak")
+        self.assertEqual(metrics["testing"]["retry_policy_stop_reason"], "history_low_recovery_probability")
         self.assertEqual(metrics["testing"]["command_reduction_rate"], 0.5)
         self.assertEqual(metrics["testing"]["slowest_command"]["label"], "script:build")
         self.assertEqual(metrics["testing"]["commands"][1]["duration_ms"], 980)

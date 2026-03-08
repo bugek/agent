@@ -106,6 +106,10 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "sandbox_started": bool(testing_summary.get("sandbox_started", False)),
             "sandbox_fallback_reason": testing_summary.get("sandbox_fallback_reason"),
             "validation_strategy": testing_summary.get("validation_strategy") or "full",
+            "retry_policy_reason": testing_summary.get("retry_policy_reason"),
+            "retry_policy_history_source": testing_summary.get("retry_policy_history_source"),
+            "retry_policy_confidence": testing_summary.get("retry_policy_confidence"),
+            "retry_policy_stop_reason": testing_summary.get("retry_policy_stop_reason"),
             "selected_command_count": _count_items(testing_summary.get("selected_command_labels")),
             "skipped_command_count": _count_items(testing_summary.get("skipped_command_labels")),
             "requested_retry_labels": [
