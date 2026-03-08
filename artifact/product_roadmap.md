@@ -94,6 +94,7 @@ Current progress:
 1. Started through the observability and review-controls slice.
 2. Policy-based edit restrictions, structured review summaries, audit trails, and persisted execution metrics are already in place.
 3. Retry orchestration now includes remediation-aware `targeted_retry`, historical strategy selection between `targeted_retry` and `full`, and an early-stop path after a failed full fallback.
+4. GitHub Actions validation now publishes `.ai-code-agent` artifacts so teams can inspect validation logs, run metrics, and diagnostics snapshots from CI runs.
 
 ## 12-Month Direction
 

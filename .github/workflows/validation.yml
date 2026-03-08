@@ -19,10 +19,30 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
+      - name: Prepare CI artifact directory
+        run: mkdir -p .ai-code-agent/ci
+
       - name: Run validation suite
-        run: python -m ai_code_agent.validation --mode full
+        run: python -m ai_code_agent.validation --mode full 2>&1 | tee .ai-code-agent/ci/validation-full.log
+
+      - name: Export CI artifact summary
+        if: always()
+        run: python artifact/export_ci_artifacts.py --workspace . --validation-log .ai-code-agent/ci/validation-full.log --recent 10
+
+      - name: Upload validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-artifacts-${{ github.run_id }}
+          path: .ai-code-agent/
+          if-no-files-found: error
