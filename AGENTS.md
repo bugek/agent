@@ -16,7 +16,7 @@ We use a Multi-Agent architecture orchestrated via a State Machine. When `langgr
 2. The orchestrator creates an `AgentState` payload and runs the planner, coder, tester, reviewer, and PR stages.
 3. The planner profiles the workspace, retrieves relevant files, records planning metadata in `planning_context`, and can emit structured `edit_intent` targets for downstream coding.
 4. The coder applies deterministic framework-aware scaffolding when possible, then falls back to LLM-guided edits and can consume planner `edit_intent` plus reviewer remediation context on retry loops.
-5. The tester runs repository-appropriate validation, using Docker when available or local execution as fallback, and can switch between full validation and targeted retry validation based on prior failure signals.
+5. The tester runs repository-appropriate validation, using Docker when available or local execution as fallback, and can switch between full validation and targeted retry validation based on prior failure signals while recording skipped-command and command-reduction effectiveness data.
 6. The reviewer combines changed files, validation signals, and generated summaries to decide whether the run is acceptable, and now emits structured remediation guidance when another coding pass is required.
 7. If approved, the workflow can proceed to git operations and PR creation.
 
@@ -100,7 +100,7 @@ flowchart TD
 	Planner output also carries retrieval evidence in `planning_context` so downstream tooling can inspect why candidate files were selected, and retry loops can attach structured `edit_intent` targets plus remediation-aware focus files.
 2. **Coder**: Edits files based on the plan.
 3. **Tester**: Runs smoke checks in a sandbox, falling back to local execution when Docker is unavailable; retry attempts can narrow validation to failed labels, failed commands, and visual-review blockers.
-4. **Reviewer**: Evaluates diffs and test results, and returns structured remediation guidance when the workflow should loop back to coding.
+4. **Reviewer**: Evaluates diffs and test results, and returns structured remediation guidance when the workflow should loop back to coding; downstream observability now tracks whether those retry loops actually recovered.
 5. **Decide**: The orchestrator assesses the Reviewer's feedback. If failed, it loops back to Coder. If passed, it interacts with Git to create a PR.
 
 ## LLM Providers
@@ -127,6 +127,7 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 - The tester can prefer Next.js-specific lint, typecheck, and build validation paths when a Next.js workspace is detected.
 - The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
 - The tester can switch to a `targeted_retry` validation strategy on remediation loops, using prior failed validation labels, failed commands, and visual-review blockers to reduce rerun cost while preserving relevant checks.
+- The execution metrics layer now captures remediation effectiveness signals such as retry recovery, remediation-assisted recovery, edit-intent-assisted recovery, skipped-command totals, and command reduction rates for targeted retries.
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
 - The planner and coder now share remediation-aware `edit_intent` metadata so retry loops can stay focused on the files, reasons, and validation targets that failed in the previous attempt.
 - The Next.js deterministic scaffold path has started a frontend quality layer with design-direction-aware templates, App Router `loading.tsx` and `error.tsx` generation, and built-in loading/empty/error/success state coverage for generated components.
@@ -149,9 +150,9 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 
 Reviewer output now includes a structured `review_summary` with changed areas, validation pass/fail labels, visual-review findings, residual risks, and remediation guidance so team review and retry loops can scan results faster.
 
-Execution traces now carry richer audit metadata in `execution_events`, including planner retrieval strategy and blocked targets, coder generation source and blocked operations, and reviewer summary status plus residual-risk counts.
+Execution traces now carry richer audit metadata in `execution_events`, including planner retrieval strategy and blocked targets, planner `edit_intent` counts, coder generation source and blocked operations, tester validation-strategy selection details, and reviewer summary status plus residual-risk counts.
 
-Production observability should aggregate those raw traces into the run-level `execution_metrics` schema described in `artifact/execution_metrics_schema.md`, including planner `edit_intent` counts and tester validation strategy metadata such as selected, skipped, and requested retry command labels.
+Production observability should aggregate those raw traces into the run-level `execution_metrics` schema described in `artifact/execution_metrics_schema.md`, including planner `edit_intent` counts, coder remediation usage, tester validation strategy metadata such as selected, skipped, and requested retry command labels, and effectiveness summaries such as retry recovery plus targeted-retry command reduction.
 
 Workflow runs can also persist the latest derived metrics artifact under `.ai-code-agent/runs/<run_id>/metrics.json` for operator diagnostics and CI artifact collection.
 
@@ -170,4 +171,4 @@ Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner beha
 9. Run `python artifact/run_retry_strategy_benchmark.py` to compare full validation plans versus targeted retry plans on the committed framework fixtures.
 10. Run `python -m ai_code_agent.validation --mode quick` for the fast local loop, or `python -m ai_code_agent.validation --mode full` to execute the full developer validation suite including NestJS and Next.js smoke fixtures. The same modes also work through `poetry run ai-code-agent-validate --mode ...`.
 11. Use `AGENT_EDIT_ALLOW_GLOBS=src/**,docs/**` and/or `AGENT_EDIT_DENY_GLOBS=artifact/fixtures/**,.github/workflows/**` when you need policy-based file restrictions for team-safe editing.
-12. Run `python -m ai_code_agent.main diagnose --repo <path>` to inspect the latest persisted workflow metrics artifact plus recent-run trends, add `--run-id <id>` for a specific run, use `--status` / `--failure-category` to narrow the recent-run view, use `--format json|ndjson|rows` for export-friendly output, and let all diagnose formats, including the default text view, reuse fresh persisted recent-run snapshots under `.ai-code-agent/diagnostics/` when they match the requested window and filters. Diagnose output now also surfaces tester validation strategy data such as `full` versus `targeted_retry`.
+12. Run `python -m ai_code_agent.main diagnose --repo <path>` to inspect the latest persisted workflow metrics artifact plus recent-run trends, add `--run-id <id>` for a specific run, use `--status` / `--failure-category` to narrow the recent-run view, use `--format json|ndjson|rows` for export-friendly output, and let all diagnose formats, including the default text view, reuse fresh persisted recent-run snapshots under `.ai-code-agent/diagnostics/` when they match the requested window and filters. Diagnose output now also surfaces tester validation strategy data such as `full` versus `targeted_retry`, per-run retry recovery and command reduction, and trend summaries for remediation recovery plus targeted-retry savings.
