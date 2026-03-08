@@ -28,6 +28,7 @@ class AgentState(TypedDict, total=False):
     # Populated by Tester
     test_results: Optional[str]
     test_passed: bool
+    visual_review: dict[str, Any]
 
     # Populated by Reviewer
     review_comments: list[str]

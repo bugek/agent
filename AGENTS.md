@@ -122,12 +122,15 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - The tester can prefer NestJS-specific script, typecheck, and build validation paths when a NestJS workspace is detected.
 - The coder can deterministically scaffold or overwrite Next.js pages, layouts, components, and API routes for common feature requests before falling back to generic LLM editing.
 - The Next.js deterministic scaffold path has started a frontend quality layer with design-direction-aware templates, App Router `loading.tsx` and `error.tsx` generation, and built-in loading/empty/error/success state coverage for generated components.
+- The tester can pass Playwright-friendly visual review env vars to frontend screenshot scripts: `AI_CODE_AGENT_VISUAL_REVIEW_DIR`, `AI_CODE_AGENT_VISUAL_REVIEW_MANIFEST`, and `AI_CODE_AGENT_PLAYWRIGHT_SCREENSHOT_DIR`. If a `visual-review`, `screenshot`, or `test:visual` script writes a manifest plus screenshot files there, the tester attaches artifact metadata into `visual_review` for the reviewer.
 - The coder can deterministically scaffold NestJS modules, controllers, services, DTOs, and root module registration for common backend feature requests.
 
 ## Evaluation Artifacts
 
 - `artifact/run_nestjs_smoke.py`: End-to-end NestJS smoke harness used to validate framework-aware generation and reviewer approval.
 - `artifact/fixtures/nestjs-smoke/`: Committed NestJS sample project used by the smoke harness.
+- `artifact/fixtures/nextjs-visual-review/`: Committed Next.js sample project showing the Playwright screenshot/manifest contract used by frontend visual review.
+- `artifact/run_nextjs_visual_review_smoke.py`: End-to-end visual-review smoke harness that installs the fixture, runs Playwright capture, and asserts manifest plus screenshot artifacts for CI.
 - `artifact/run_retrieval_eval.py`: Benchmark runner that compares `baseline` and `hybrid` retrieval modes.
 - `artifact/fixtures/retrieval-eval-sample/`: Sample repository for retrieval benchmarking across backend and frontend cases.
 - `ai_code_agent/validation.py`: Single entrypoint that runs compile checks, unit tests, and retrieval evaluation in sequence.

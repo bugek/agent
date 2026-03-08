@@ -18,19 +18,23 @@ class ValidationTest(unittest.TestCase):
         mock_run.assert_called_once_with(step.command, cwd=validation.REPO_ROOT, check=False)
 
     def test_main_runs_all_validation_steps_on_success(self) -> None:
-        with patch("ai_code_agent.validation._run_step", side_effect=[0, 0, 0]) as mock_run_step:
+        with patch("ai_code_agent.validation._run_step", side_effect=[0, 0, 0, 0]) as mock_run_step:
             exit_code = validation.main()
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(mock_run_step.call_count, 3)
+        self.assertEqual(mock_run_step.call_count, 4)
         called_steps = [call.args[0] for call in mock_run_step.call_args_list]
-        self.assertEqual([step.label for step in called_steps], ["compileall", "unit tests", "retrieval evaluation"])
+        self.assertEqual(
+            [step.label for step in called_steps],
+            ["compileall", "unit tests", "nextjs visual review smoke", "retrieval evaluation"],
+        )
         self.assertEqual(called_steps[0].command, [validation.sys.executable, "-m", "compileall", "ai_code_agent", "tests"])
         self.assertEqual(called_steps[1].command, [validation.sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
-        self.assertEqual(called_steps[2].command, [validation.sys.executable, "artifact/run_retrieval_eval.py"])
+        self.assertEqual(called_steps[2].command, [validation.sys.executable, "artifact/run_nextjs_visual_review_smoke.py"])
+        self.assertEqual(called_steps[3].command, [validation.sys.executable, "artifact/run_retrieval_eval.py"])
 
     def test_main_stops_after_first_failing_step(self) -> None:
-        with patch("ai_code_agent.validation._run_step", side_effect=[0, 7, 0]) as mock_run_step:
+        with patch("ai_code_agent.validation._run_step", side_effect=[0, 7, 0, 0]) as mock_run_step:
             exit_code = validation.main()
 
         self.assertEqual(exit_code, 7)

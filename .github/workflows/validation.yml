@@ -19,5 +19,10 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Run validation suite
         run: python -m ai_code_agent.validation

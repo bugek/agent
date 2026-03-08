@@ -35,15 +35,19 @@ class ReviewerAgent(BaseAgent):
             "patch_count": len(patches),
             "changed_files": changed_files,
             "validation_signals": validation_signals,
+            "visual_review": state.get("visual_review"),
             "codegen_summary": state.get("codegen_summary", {}),
             "analysis_only": analysis_only,
         }
         llm_review = self.llm.generate_json(REVIEWER_SYSTEM_PROMPT, json.dumps(review_payload, indent=2))
         comments.extend(self._normalize_comments(llm_review.get("review_comments", [])))
+        comments.extend(self._visual_review_comments(state.get("visual_review"), analysis_only))
 
         review_approved = state.get("test_passed", False) and (analysis_only or bool(patches))
         if not analysis_only and "review_approved" in llm_review:
             review_approved = review_approved and bool(llm_review["review_approved"])
+        if not analysis_only and self._visual_review_has_blockers(state.get("visual_review")):
+            review_approved = False
 
         if not comments:
             comments.append("Review passed.")
@@ -68,3 +72,41 @@ class ReviewerAgent(BaseAgent):
         if isinstance(raw_comments, list):
             return [comment for comment in raw_comments if isinstance(comment, str) and comment.strip()]
         return []
+
+    def _visual_review_comments(self, visual_review: object, analysis_only: bool) -> list[str]:
+        if analysis_only or not isinstance(visual_review, dict) or not visual_review.get("enabled"):
+            return []
+
+        state_coverage = visual_review.get("state_coverage") or {}
+        comments: list[str] = []
+        missing_states = [
+            state_name
+            for state_name, covered in state_coverage.items()
+            if state_name in {"loading_state", "empty_state", "error_state", "success_state"} and not covered
+        ]
+        if missing_states:
+            comments.append(f"Frontend visual review is missing component states: {', '.join(sorted(missing_states))}.")
+
+        if not state_coverage.get("loading_file"):
+            comments.append("Frontend visual review did not find a loading.tsx/loading.ts companion file for the changed route.")
+        if not state_coverage.get("error_file"):
+            comments.append("Frontend visual review did not find an error.tsx/error.ts companion file for the changed route.")
+
+        screenshot_status = visual_review.get("screenshot_status")
+        if screenshot_status == "failed":
+            comments.append("Frontend screenshot or visual-review command failed.")
+        elif screenshot_status == "missing_artifacts":
+            comments.append("Frontend screenshot command completed without producing any screenshot artifacts or manifest metadata.")
+        elif screenshot_status == "not_configured":
+            comments.append("Frontend screenshot review is not configured; relying on structural visual checks only.")
+
+        return comments
+
+    def _visual_review_has_blockers(self, visual_review: object) -> bool:
+        if not isinstance(visual_review, dict) or not visual_review.get("enabled"):
+            return False
+        state_coverage = visual_review.get("state_coverage") or {}
+        required_flags = ["loading_state", "empty_state", "error_state", "success_state", "loading_file", "error_file"]
+        if any(not state_coverage.get(flag) for flag in required_flags):
+            return True
+        return visual_review.get("screenshot_status") in {"failed", "missing_artifacts"}

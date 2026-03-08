@@ -32,13 +32,17 @@ class SandboxRunner:
             self.container_started = True
         return {"mode": self.mode, "started": self.container_started}
         
-    def execute(self, cmd: str, timeout: int = 60) -> dict:
+    def execute(self, cmd: str, timeout: int = 60, env: dict[str, str] | None = None) -> dict:
         """
         Run a command in the container.
         Returns dict with stdout, stderr, and exit_code.
         """
         if not self.container_started:
             self.start_container()
+
+        runtime_env = os.environ.copy()
+        if env:
+            runtime_env.update(env)
 
         if self.mode == "docker":
             workspace = os.path.abspath(self.workspace)
@@ -50,11 +54,16 @@ class SandboxRunner:
                 f"{workspace}:/workspace",
                 "-w",
                 "/workspace",
+            ]
+            if env:
+                for key, value in env.items():
+                    docker_cmd.extend(["-e", f"{key}={value}"])
+            docker_cmd.extend([
                 self.image,
                 "sh",
                 "-lc",
                 cmd,
-            ]
+            ])
             result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout, check=False)
         else:
             result = subprocess.run(
@@ -65,6 +74,7 @@ class SandboxRunner:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=runtime_env,
             )
 
         return {

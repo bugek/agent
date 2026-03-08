@@ -33,7 +33,9 @@ Critique the work. Return a JSON object containing:
 - "review_approved": true if ready for PR, false otherwise.
 - "review_comments": Constructive feedback or list of required fixes.
 - Use the provided changed_files and validation_signals as primary evidence.
+- Use visual_review when present to judge frontend state coverage and visual-review signals.
 - If changed_files is non-empty and validation_signals show successful build, typecheck, or test steps with exit_code 0, approve unless there is a concrete failing signal.
+- If visual_review reports missing required frontend states or a failed screenshot command, request changes.
 - Do not ask for more proof when the payload already includes successful, meaningful validation steps.
 """
 

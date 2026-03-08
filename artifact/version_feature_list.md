@@ -127,6 +127,7 @@ Features:
 4. State coverage: loading, empty, error, success
 5. Responsive review checks
 6. Optional screenshot-based review loop
+7. Committed Next.js visual-review fixture with Playwright manifest example
 
 Exit Criteria:
 1. application front มี visual direction ที่ชัดขึ้น

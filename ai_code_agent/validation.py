@@ -29,6 +29,7 @@ def main() -> int:
     steps = [
         ValidationStep("compileall", [sys.executable, "-m", "compileall", "ai_code_agent", "tests"]),
         ValidationStep("unit tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]),
+        ValidationStep("nextjs visual review smoke", [sys.executable, "artifact/run_nextjs_visual_review_smoke.py"]),
         ValidationStep("retrieval evaluation", [sys.executable, "artifact/run_retrieval_eval.py"]),
     ]
 
