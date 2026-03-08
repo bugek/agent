@@ -207,6 +207,8 @@ def code_node(state: AgentState) -> dict[str, Any]:
             "blocked_operations": len(result.get("codegen_summary", {}).get("blocked_operations", [])),
             "failed_operations": len(result.get("codegen_summary", {}).get("failed_operations", [])),
             "generated_by": result.get("codegen_summary", {}).get("generated_by"),
+            "remediation_applied": bool(result.get("codegen_summary", {}).get("remediation_applied")),
+            "remediation_focus_count": result.get("codegen_summary", {}).get("remediation_focus_count", 0),
         },
     )
     return _finalize_result(state, result)
@@ -260,6 +262,8 @@ def review_node(state: AgentState) -> dict[str, Any]:
             "retry_count": result.get("retry_count", current_state.get("retry_count", 0)),
             "review_status": result.get("review_summary", {}).get("status"),
             "residual_risks": len(result.get("review_summary", {}).get("residual_risks", [])),
+            "remediation_required": bool(result.get("review_summary", {}).get("remediation", {}).get("required")),
+            "remediation_focus_count": len(result.get("review_summary", {}).get("remediation", {}).get("focus_areas", [])),
         },
     )
     return _finalize_result(state, result)

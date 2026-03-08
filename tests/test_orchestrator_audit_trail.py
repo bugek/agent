@@ -104,6 +104,8 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["blocked_operations"], 1)
         self.assertEqual(event["details"]["failed_operations"], 1)
         self.assertEqual(event["details"]["generated_by"], "llm")
+        self.assertEqual(event["details"]["remediation_applied"], False)
+        self.assertEqual(event["details"]["remediation_focus_count"], 0)
         self.assertEqual(result["execution_metrics"]["coding"]["blocked_operation_count"], 1)
 
     def test_review_node_records_summary_status_and_risks(self) -> None:
@@ -113,6 +115,10 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
             "review_summary": {
                 "status": "approved",
                 "residual_risks": ["1 operation(s) were blocked by file edit policy."],
+                "remediation": {
+                    "required": False,
+                    "focus_areas": [],
+                },
             },
         }
 
@@ -138,6 +144,8 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["status"], "approved")
         self.assertEqual(event["details"]["review_status"], "approved")
         self.assertEqual(event["details"]["residual_risks"], 1)
+        self.assertEqual(event["details"]["remediation_required"], False)
+        self.assertEqual(event["details"]["remediation_focus_count"], 0)
         self.assertEqual(result["execution_metrics"]["review"]["status"], "approved")
 
     def test_test_node_marks_failed_status_and_second_attempt(self) -> None:

@@ -35,17 +35,29 @@ class CoderAgent(BaseAgent):
 
         editor = FileEditor(state["workspace_dir"])
         workspace_profile = state.get("workspace_profile") or detect_workspace_profile(state["workspace_dir"])
-        nextjs_operations = self._build_nextjs_operations(state, workspace_profile, editor)
-        if nextjs_operations:
-            return self._apply_operations(editor, state, nextjs_operations, generated_by="nextjs_scaffold")
+        remediation_context = self._remediation_context(state)
+        if remediation_context is None:
+            nextjs_operations = self._build_nextjs_operations(state, workspace_profile, editor)
+            if nextjs_operations:
+                return self._apply_operations(
+                    editor,
+                    state,
+                    nextjs_operations,
+                    generated_by="nextjs_scaffold",
+                    remediation_context=None,
+                )
 
-        nestjs_operations = self._build_nestjs_operations(state, workspace_profile, editor)
-        if nestjs_operations:
-            return self._apply_operations(editor, state, nestjs_operations, generated_by="nestjs_scaffold")
+            nestjs_operations = self._build_nestjs_operations(state, workspace_profile, editor)
+            if nestjs_operations:
+                return self._apply_operations(
+                    editor,
+                    state,
+                    nestjs_operations,
+                    generated_by="nestjs_scaffold",
+                    remediation_context=None,
+                )
 
-        candidate_files = [
-            file_path for file_path in state.get("files_to_edit", []) if self._exists(state, file_path)
-        ][:5]
+        candidate_files = self._candidate_files_for_prompt(state, remediation_context)
         candidate_files, blocked_context_files = filter_edit_paths(
             candidate_files,
             self.config.edit_allow_globs,
@@ -65,6 +77,8 @@ class CoderAgent(BaseAgent):
                 self.config.edit_allow_globs,
                 self.config.edit_deny_globs,
             ),
+            "retry_count": state.get("retry_count", 0),
+            "remediation": remediation_context,
             "files": file_context,
             "schema": {
                 "operations": [
@@ -83,7 +97,13 @@ class CoderAgent(BaseAgent):
             },
         }
         response = self.llm.generate_json(CODER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
-        result = self._apply_operations(editor, state, response.get("operations", []), generated_by="llm")
+        result = self._apply_operations(
+            editor,
+            state,
+            response.get("operations", []),
+            generated_by="llm",
+            remediation_context=remediation_context,
+        )
         if blocked_context_files:
             result.setdefault("codegen_summary", {})["blocked_context_files"] = blocked_context_files
         return result
@@ -94,6 +114,7 @@ class CoderAgent(BaseAgent):
         state: AgentState,
         operations: list[dict[str, Any]],
         generated_by: str,
+        remediation_context: dict[str, Any] | None,
     ) -> dict:
         patches: list[dict] = []
         failures: list[str] = []
@@ -141,8 +162,88 @@ class CoderAgent(BaseAgent):
                     self.config.edit_deny_globs,
                 ),
                 "generated_by": generated_by,
+                "retry_count": state.get("retry_count", 0),
+                "remediation_applied": bool(remediation_context),
+                "remediation_focus_count": len(remediation_context.get("focus_areas", [])) if remediation_context else 0,
             },
         }
+
+    def _candidate_files_for_prompt(
+        self,
+        state: AgentState,
+        remediation_context: dict[str, Any] | None,
+    ) -> list[str]:
+        candidates: list[str] = []
+        for file_path in state.get("files_to_edit", []):
+            if isinstance(file_path, str) and self._exists(state, file_path):
+                candidates.append(file_path)
+
+        if remediation_context:
+            for file_path in remediation_context.get("focus_areas", []):
+                if isinstance(file_path, str) and self._exists(state, file_path):
+                    candidates.append(file_path)
+
+        for patch in state.get("patches", []):
+            file_path = patch.get("file") if isinstance(patch, dict) else None
+            if isinstance(file_path, str) and self._exists(state, file_path):
+                candidates.append(file_path)
+
+        deduplicated: list[str] = []
+        seen: set[str] = set()
+        for file_path in candidates:
+            normalized = file_path.replace("\\", "/")
+            if normalized in seen:
+                continue
+            deduplicated.append(normalized)
+            seen.add(normalized)
+        return deduplicated[:5]
+
+    def _remediation_context(self, state: AgentState) -> dict[str, Any] | None:
+        if int(state.get("retry_count", 0) or 0) <= 0:
+            return None
+
+        review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
+        remediation = review_summary.get("remediation") if isinstance(review_summary.get("remediation"), dict) else {}
+        required = bool(remediation.get("required"))
+        if not required:
+            return None
+
+        context = {
+            "source": "review_loop",
+            "review_status": review_summary.get("status"),
+            "failed_validation_labels": [
+                label
+                for label in remediation.get("failed_validation_labels", [])
+                if isinstance(label, str) and label
+            ],
+            "blocked_file_paths": [
+                file_path
+                for file_path in remediation.get("blocked_file_paths", [])
+                if isinstance(file_path, str) and file_path
+            ],
+            "failed_operations": [
+                item
+                for item in remediation.get("failed_operations", [])
+                if isinstance(item, str) and item
+            ],
+            "focus_areas": [
+                file_path
+                for file_path in remediation.get("focus_areas", [])
+                if isinstance(file_path, str) and file_path
+            ],
+            "guidance": [
+                item
+                for item in remediation.get("guidance", [])
+                if isinstance(item, str) and item
+            ],
+            "testing_summary": state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {},
+        }
+        if not any(
+            context[key]
+            for key in ["failed_validation_labels", "blocked_file_paths", "failed_operations", "focus_areas", "guidance"]
+        ):
+            return None
+        return context
 
     def _exists(self, state: AgentState, file_path: str) -> bool:
         path = Path(state["workspace_dir"]) / file_path

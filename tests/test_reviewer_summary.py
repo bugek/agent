@@ -65,6 +65,38 @@ class ReviewerSummaryTest(unittest.TestCase):
         self.assertEqual(summary["visual_review"]["responsive_categories"], ["desktop", "mobile"])
         self.assertIn("1 operation(s) were blocked by file edit policy.", summary["residual_risks"])
         self.assertIn("Needs follow-up on generated docs.", summary["residual_risks"])
+        self.assertEqual(summary["remediation"]["required"], False)
+
+    def test_review_summary_includes_remediation_for_retry_loop(self) -> None:
+        reviewer = ReviewerAgent(
+            AgentConfig(workspace_dir="."),
+            StubLLM({"review_comments": ["Fix the failing compile step in the generated controller."], "review_approved": False}),
+        )
+
+        result = reviewer.run(
+            {
+                "issue_description": "add controller endpoint",
+                "workspace_dir": ".",
+                "patches": [{"file": "src/users/users.controller.ts"}],
+                "test_passed": False,
+                "test_results": "compileall(exit=1):\nboom\nscript:test(exit=0):\n",
+                "codegen_summary": {
+                    "failed_operations": ["replace_text failed for src/users/users.controller.ts"],
+                    "blocked_operations": [
+                        {"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule: artifact/fixtures/**"}
+                    ],
+                },
+                "visual_review": None,
+            }
+        )
+
+        remediation = result["review_summary"]["remediation"]
+        self.assertEqual(remediation["required"], True)
+        self.assertEqual(remediation["failed_validation_labels"], ["compileall"])
+        self.assertEqual(remediation["blocked_file_paths"], ["artifact/fixtures/demo.txt"])
+        self.assertEqual(remediation["failed_operations"], ["replace_text failed for src/users/users.controller.ts"])
+        self.assertIn("src/users/users.controller.ts", remediation["focus_areas"])
+        self.assertIn("Fix the failing compile step in the generated controller.", remediation["guidance"])
 
 
 if __name__ == "__main__":

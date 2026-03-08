@@ -156,6 +156,14 @@ class ReviewerAgent(BaseAgent):
             "validation": self._validation_summary(validation_signals),
             "visual_review": self._visual_review_summary(visual_review),
             "residual_risks": self._residual_risks(codegen_summary, comments, review_approved, analysis_only),
+            "remediation": self._remediation_summary(
+                changed_files,
+                validation_signals,
+                codegen_summary,
+                comments,
+                review_approved,
+                analysis_only,
+            ),
         }
 
     def _changed_areas(self, changed_files: list[str]) -> list[str]:
@@ -230,3 +238,50 @@ class ReviewerAgent(BaseAgent):
             if normalized not in risks:
                 risks.append(normalized)
         return risks
+
+    def _remediation_summary(
+        self,
+        changed_files: list[str],
+        validation_signals: list[dict[str, object]],
+        codegen_summary: object,
+        comments: list[str],
+        review_approved: bool,
+        analysis_only: bool,
+    ) -> dict[str, object]:
+        failed_validation_labels = [
+            label
+            for label in self._validation_summary(validation_signals)["failed"]
+            if isinstance(label, str) and label
+        ]
+        blocked_file_paths: list[str] = []
+        failed_operations: list[str] = []
+        if isinstance(codegen_summary, dict):
+            blocked_file_paths = [
+                item.get("file_path")
+                for item in codegen_summary.get("blocked_operations") or []
+                if isinstance(item, dict) and isinstance(item.get("file_path"), str) and item.get("file_path")
+            ]
+            failed_operations = [
+                item
+                for item in codegen_summary.get("failed_operations") or []
+                if isinstance(item, str) and item
+            ]
+
+        guidance = [
+            comment.strip()
+            for comment in comments
+            if isinstance(comment, str)
+            and comment.strip()
+            and comment.strip() != "Review passed."
+            and not comment.strip().startswith("Looks ready for PR")
+        ]
+
+        focus_areas = list(dict.fromkeys(changed_files[:5] + blocked_file_paths[:5]))
+        return {
+            "required": bool(not review_approved and not analysis_only),
+            "failed_validation_labels": failed_validation_labels,
+            "blocked_file_paths": blocked_file_paths,
+            "failed_operations": failed_operations,
+            "focus_areas": focus_areas,
+            "guidance": guidance,
+        }
