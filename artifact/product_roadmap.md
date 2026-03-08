@@ -141,5 +141,5 @@ Current progress:
 1. CI integration that publishes validation and diagnostics artifacts on every push/PR
 2. Better sandbox backends, especially remote or production-like execution options
 3. Richer retry-policy tuning from larger history windows and operator feedback
-4. Operator-facing failure taxonomy and dashboard-oriented diagnostics
+4. Better operator diagnostics on top of the new failure taxonomy and dashboard-oriented summaries
 5. Richer GitHub and Azure DevOps branch policies, linking, and PR metadata

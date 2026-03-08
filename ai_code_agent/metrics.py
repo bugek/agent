@@ -47,6 +47,9 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
     analysis_only = bool(re.search(r"\b(analyze|inspect|summari[sz]e|review|readiness)\b", state.get("issue_description", ""), re.I))
     failure_categories = _failure_categories(state, test_signals, review_summary, codegen_summary)
 
+    primary_category = failure_categories[0] if failure_categories else None
+    failure_subcategory = _failure_subcategory(state, primary_category, test_signals, review_summary, codegen_summary)
+
     return {
         "schema_version": "execution-metrics/v1",
         "run_id": run_id,
@@ -140,8 +143,13 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
         },
         "failures": {
             "has_failure": not (bool(state.get("review_approved", False)) and bool(state.get("test_passed", False))),
-            "primary_category": failure_categories[0] if failure_categories else None,
+            "primary_category": primary_category,
+            "subcategory": failure_subcategory,
             "categories": failure_categories,
+            "taxonomy": {
+                "category": primary_category,
+                "subcategory": failure_subcategory,
+            },
             "error_message": _primary_error_message(state, test_signals),
             "blocking_comment_count": _blocking_comment_count(state.get("review_comments", [])),
         },
@@ -309,6 +317,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "average_duration_ms": 0,
             "average_testing_duration_ms": 0,
             "primary_failure_categories": {},
+            "primary_failure_subcategories": {},
             "validation_strategies": {},
             "effectiveness": {
                 "retry_runs": 0,
@@ -356,6 +365,17 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 },
             },
             "failure_category_breakdown": {},
+            "failure_subcategory_breakdown": {},
+            "retry_policy_stop_reasons": {},
+            "sandbox_fallback_reasons": {},
+            "dashboard": {
+                "latest_failure_category": None,
+                "latest_failure_subcategory": None,
+                "dominant_failure_category": None,
+                "dominant_failure_subcategory": None,
+                "retry_stop_rate": 0.0,
+                "sandbox_fallback_rate": 0.0,
+            },
             "slowest_commands": [],
             "top_terminal_nodes": [],
             "top_failing_commands": [],
@@ -395,11 +415,15 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     total_duration_ms = 0
     total_testing_duration_ms = 0
     failure_categories: dict[str, int] = {}
+    failure_subcategories: dict[str, int] = {}
     failure_category_breakdown: dict[str, dict[str, Any]] = {}
+    failure_subcategory_breakdown: dict[str, dict[str, Any]] = {}
     command_stats: dict[str, dict[str, Any]] = {}
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
     validation_strategy_counts: dict[str, int] = {}
+    retry_policy_stop_reasons: dict[str, int] = {}
+    sandbox_fallback_reasons: dict[str, int] = {}
     strategy_stats: dict[str, dict[str, float | int]] = {
         "full": {
             "run_count": 0,
@@ -450,6 +474,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             total_duration_ms += _as_int(workflow.get("duration_ms"))
             total_testing_duration_ms += _as_int(testing.get("total_duration_ms"))
         primary_category = failures.get("primary_category")
+        failure_subcategory = failures.get("subcategory") if isinstance(failures.get("subcategory"), str) and failures.get("subcategory") else _failure_subcategory_from_metrics(metrics)
         if isinstance(primary_category, str) and primary_category:
             failure_categories[primary_category] = failure_categories.get(primary_category, 0) + 1
             bucket = failure_category_breakdown.get(primary_category)
@@ -461,6 +486,15 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 }
                 failure_category_breakdown[primary_category] = bucket
             bucket["run_count"] += 1
+        if isinstance(failure_subcategory, str) and failure_subcategory:
+            failure_subcategories[failure_subcategory] = failure_subcategories.get(failure_subcategory, 0) + 1
+            subcategory_bucket = failure_subcategory_breakdown.get(failure_subcategory)
+            if subcategory_bucket is None:
+                subcategory_bucket = {"run_count": 0, "primary_categories": {}}
+                failure_subcategory_breakdown[failure_subcategory] = subcategory_bucket
+            subcategory_bucket["run_count"] += 1
+            if isinstance(primary_category, str) and primary_category:
+                subcategory_bucket["primary_categories"][primary_category] = subcategory_bucket["primary_categories"].get(primary_category, 0) + 1
         if isinstance(terminal_node, str) and terminal_node:
             terminal_node_counts[terminal_node] = terminal_node_counts.get(terminal_node, 0) + 1
             if isinstance(primary_category, str) and primary_category:
@@ -468,8 +502,14 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 breakdown_terminal_nodes[terminal_node] = breakdown_terminal_nodes.get(terminal_node, 0) + 1
         failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
         validation_strategy = testing.get("validation_strategy")
+        stop_reason = testing.get("retry_policy_stop_reason")
+        sandbox_fallback_reason = testing.get("sandbox_fallback_reason")
         if isinstance(validation_strategy, str) and validation_strategy:
             validation_strategy_counts[validation_strategy] = validation_strategy_counts.get(validation_strategy, 0) + 1
+        if isinstance(stop_reason, str) and stop_reason:
+            retry_policy_stop_reasons[stop_reason] = retry_policy_stop_reasons.get(stop_reason, 0) + 1
+        if isinstance(sandbox_fallback_reason, str) and sandbox_fallback_reason:
+            sandbox_fallback_reasons[sandbox_fallback_reason] = sandbox_fallback_reasons.get(sandbox_fallback_reason, 0) + 1
         normalized_strategy = validation_strategy if validation_strategy == "targeted_retry" else "full"
         strategy_bucket = strategy_stats[normalized_strategy]
         strategy_bucket["run_count"] += 1
@@ -630,6 +670,9 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         else None
     )
     strategy_comparison = _strategy_comparison_summary(strategy_stats)
+    latest_failures = latest_metrics.get("failures") if isinstance(latest_metrics.get("failures"), dict) else {}
+    retry_stop_count = sum(retry_policy_stop_reasons.values())
+    sandbox_fallback_count = sum(sandbox_fallback_reasons.values())
     return {
         "run_count": run_count,
         "comparable_run_count": comparable_run_count,
@@ -640,6 +683,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "average_duration_ms": int(total_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "average_testing_duration_ms": int(total_testing_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "primary_failure_categories": dict(sorted(failure_categories.items())),
+        "primary_failure_subcategories": dict(sorted(failure_subcategories.items())),
         "validation_strategies": dict(sorted(validation_strategy_counts.items())),
         "effectiveness": {
             "retry_runs": retry_runs,
@@ -680,6 +724,30 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 ],
             }
             for category, breakdown in sorted(failure_category_breakdown.items())
+        },
+        "failure_subcategory_breakdown": {
+            subcategory: {
+                "run_count": breakdown["run_count"],
+                "primary_categories": [
+                    {"category": category, "count": count}
+                    for category, count in sorted(
+                        breakdown["primary_categories"].items(),
+                        key=lambda item: (item[1], item[0]),
+                        reverse=True,
+                    )[:3]
+                ],
+            }
+            for subcategory, breakdown in sorted(failure_subcategory_breakdown.items())
+        },
+        "retry_policy_stop_reasons": dict(sorted(retry_policy_stop_reasons.items())),
+        "sandbox_fallback_reasons": dict(sorted(sandbox_fallback_reasons.items())),
+        "dashboard": {
+            "latest_failure_category": latest_failures.get("primary_category"),
+            "latest_failure_subcategory": latest_failures.get("subcategory") or _failure_subcategory_from_metrics(latest_metrics),
+            "dominant_failure_category": _top_key(failure_categories),
+            "dominant_failure_subcategory": _top_key(failure_subcategories),
+            "retry_stop_rate": round(retry_stop_count / comparable_run_count, 2) if comparable_run_count else 0.0,
+            "sandbox_fallback_rate": round(sandbox_fallback_count / run_count, 2) if run_count else 0.0,
         },
         "slowest_commands": sorted(
             command_stats.values(),
@@ -773,6 +841,7 @@ def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, An
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
+        "failure_subcategory": failures.get("subcategory") or _failure_subcategory_from_metrics(metrics) or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
         "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
         "skipped_command_count": testing.get("skipped_command_count") or 0,
@@ -1041,6 +1110,120 @@ def _failure_categories(
         if category in categories and category not in deduped:
             deduped.append(category)
     return deduped or (["unknown"] if state.get("error_message") or test_results else [])
+
+
+def _failure_subcategory(
+    state: dict[str, Any],
+    primary_category: str | None,
+    test_signals: list[dict[str, Any]],
+    review_summary: dict[str, Any],
+    codegen_summary: dict[str, Any],
+) -> str | None:
+    if primary_category == "configuration":
+        return _configuration_subcategory(state)
+    if primary_category == "sandbox":
+        return _sandbox_subcategory(state)
+    if primary_category == "policy":
+        return "blocked_edit_target"
+    if primary_category == "validation":
+        return _validation_subcategory(state, test_signals, review_summary)
+    if primary_category == "generation":
+        if _count_items(codegen_summary.get("failed_operations")):
+            return "failed_operation"
+        if not _count_items(state.get("patches")) and not _is_analysis_only(state.get("issue_description", "")):
+            return "no_code_changes"
+        return "generation_failure"
+    if primary_category == "review":
+        return "review_changes_required"
+    if primary_category == "unknown":
+        return "unknown_failure"
+    return None
+
+
+def _failure_subcategory_from_metrics(metrics: dict[str, Any]) -> str | None:
+    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    primary_category = failures.get("primary_category") if isinstance(failures.get("primary_category"), str) else None
+    testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    review = metrics.get("review") if isinstance(metrics.get("review"), dict) else {}
+    coding = metrics.get("coding") if isinstance(metrics.get("coding"), dict) else {}
+    if primary_category == "configuration":
+        error_message = failures.get("error_message") if isinstance(failures.get("error_message"), str) else ""
+        return _configuration_subcategory({"error_message": error_message, "test_results": error_message})
+    if primary_category == "sandbox":
+        fallback_reason = testing.get("sandbox_fallback_reason")
+        if isinstance(fallback_reason, str) and fallback_reason:
+            return fallback_reason
+        commands = testing.get("commands") if isinstance(testing.get("commands"), list) else []
+        if any(isinstance(command, dict) and command.get("timed_out") for command in commands):
+            return "command_timeout"
+        return "sandbox_runtime_failure"
+    if primary_category == "policy":
+        return "blocked_edit_target"
+    if primary_category == "validation":
+        visual_review = testing.get("visual_review") if isinstance(testing.get("visual_review"), dict) else {}
+        if visual_review.get("screenshot_status") == "missing_artifacts":
+            return "visual_review_missing_artifacts"
+        if _as_int(visual_review.get("missing_responsive_category_count")) > 0:
+            return "visual_review_missing_responsive_coverage"
+        if _as_int(visual_review.get("missing_state_count")) > 0:
+            return "visual_review_missing_states"
+        failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
+        first_failed = next((label for label in failed_commands if isinstance(label, str) and label), None)
+        return f"command:{first_failed}" if first_failed else "validation_failure"
+    if primary_category == "generation":
+        if _as_int(coding.get("failed_operation_count")) > 0:
+            return "failed_operation"
+        issue = metrics.get("issue") if isinstance(metrics.get("issue"), dict) else {}
+        if _as_int(coding.get("patch_count")) == 0 and issue.get("mode") == "change_request":
+            return "no_code_changes"
+        return "generation_failure"
+    if primary_category == "review":
+        return "review_changes_required" if review.get("status") == "changes_required" else "review_blocked"
+    if primary_category == "unknown":
+        return "unknown_failure"
+    return None
+
+
+def _configuration_subcategory(state: dict[str, Any]) -> str:
+    haystack = f"{state.get('error_message', '')}\n{state.get('test_results', '')}".lower()
+    if any(token in haystack for token in ["missing api key", "not configured", "provider is not configured"]):
+        return "missing_credentials"
+    if "unsupported validation mode" in haystack:
+        return "unsupported_validation_mode"
+    return "configuration_error"
+
+
+def _sandbox_subcategory(state: dict[str, Any]) -> str:
+    testing_summary = state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {}
+    fallback_reason = testing_summary.get("sandbox_fallback_reason")
+    if isinstance(fallback_reason, str) and fallback_reason:
+        return fallback_reason
+    commands = testing_summary.get("commands") if isinstance(testing_summary.get("commands"), list) else []
+    if any(isinstance(command, dict) and command.get("timed_out") for command in commands):
+        return "command_timeout"
+    return "sandbox_runtime_failure"
+
+
+def _validation_subcategory(state: dict[str, Any], test_signals: list[dict[str, Any]], review_summary: dict[str, Any]) -> str:
+    visual_review = review_summary.get("visual_review") if isinstance(review_summary.get("visual_review"), dict) else {}
+    if visual_review.get("screenshot_status") == "missing_artifacts":
+        return "visual_review_missing_artifacts"
+    if _count_items(visual_review.get("missing_responsive_categories")) > 0:
+        return "visual_review_missing_responsive_coverage"
+    if _count_items(visual_review.get("missing_states")) > 0:
+        return "visual_review_missing_states"
+    testing_summary = state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {}
+    failed_commands = testing_summary.get("failed_commands") if isinstance(testing_summary.get("failed_commands"), list) else []
+    first_failed = next((label for label in failed_commands if isinstance(label, str) and label), None)
+    if first_failed is None:
+        first_failed = next((signal.get("label") for signal in test_signals if signal.get("exit_code") != 0 and isinstance(signal.get("label"), str)), None)
+    return f"command:{first_failed}" if first_failed else "validation_failure"
+
+
+def _top_key(values: dict[str, int]) -> str | None:
+    if not values:
+        return None
+    return sorted(values.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
 
 
 def _looks_like_configuration_failure(error_message: str, test_results: str) -> bool:

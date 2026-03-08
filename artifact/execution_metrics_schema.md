@@ -300,9 +300,19 @@ The repository can implement this incrementally by first deriving `execution_met
 
 - `failures.has_failure`: true when workflow is not approved.
 - `failures.primary_category`: one of `validation`, `review`, `policy`, `generation`, `sandbox`, `configuration`, `unknown`.
+- `failures.subcategory`: stable operator-facing detail such as `command:script:test`, `blocked_edit_target`, or `docker_unavailable`.
+- `failures.taxonomy`: compact object containing both `category` and `subcategory` for dashboard consumers.
 - `failures.categories`: deduplicated list of present failure categories.
 - `failures.error_message`: top-level `error_message` if present, else first blocking review/test signal.
 - `failures.blocking_comment_count`: count of comments that indicate blockers.
+
+### Cross-Run Diagnostics Trend
+
+- `primary_failure_subcategories`: counts for the dominant failure detail across recent runs.
+- `failure_subcategory_breakdown`: subcategory to top primary categories summary for dashboard grouping.
+- `retry_policy_stop_reasons`: counts of history-driven retry stop reasons across the comparison window.
+- `sandbox_fallback_reasons`: counts of sandbox fallback reasons across the comparison window.
+- `dashboard`: compact operator summary containing latest and dominant failure category/subcategory plus retry-stop and sandbox-fallback rates.
 
 ### Phases
 
@@ -403,6 +413,16 @@ Use a small, stable taxonomy so dashboards remain readable.
 - `configuration`: missing runtime, package manager, provider, or workspace prerequisites
 - `unknown`: fallback when none of the above fit
 
+Recommended subcategories should stay compact and reusable:
+
+- `configuration`: `missing_credentials`, `unsupported_validation_mode`, `configuration_error`
+- `sandbox`: backend fallback or runtime details such as `docker_unavailable`, `command_timeout`, `sandbox_runtime_failure`
+- `policy`: `blocked_edit_target`
+- `validation`: command-scoped labels such as `command:script:test` plus visual-review variants such as `visual_review_missing_states`
+- `generation`: `failed_operation`, `no_code_changes`, `generation_failure`
+- `review`: `review_changes_required`, `review_blocked`
+- `unknown`: `unknown_failure`
+
 `primary_category` should pick the first category in this precedence order:
 
 1. `configuration`
@@ -432,6 +452,7 @@ Use a small, stable taxonomy so dashboards remain readable.
 1. Write metrics JSON as an artifact in `.ai-code-agent/runs/<run_id>/metrics.json`.
 2. Add `ai_code_agent.main diagnose` or `runs --latest` style summaries.
 3. Feed failure taxonomy into CI dashboards and retry tuning.
+4. Surface dashboard-oriented summaries for latest failure detail, dominant recent failure patterns, retry stop rates, and sandbox fallback rates.
 
 ## Compatibility Rules
 

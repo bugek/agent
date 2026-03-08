@@ -138,6 +138,8 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["effectiveness"]["command_reduction_count"], 1)
         self.assertEqual(metrics["effectiveness"]["command_reduction_rate"], 0.5)
         self.assertEqual(metrics["failures"]["primary_category"], "policy")
+        self.assertEqual(metrics["failures"]["subcategory"], "blocked_edit_target")
+        self.assertEqual(metrics["failures"]["taxonomy"], {"category": "policy", "subcategory": "blocked_edit_target"})
         self.assertEqual(metrics["phases"]["test"]["status"], "failed")
         self.assertEqual(metrics["phases"]["test"]["duration_ms"], 37000)
 

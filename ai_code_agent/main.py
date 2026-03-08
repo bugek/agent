@@ -262,6 +262,11 @@ def _print_summary_text_output(
             "Primary failure categories: "
             + ", ".join(f"{name}={count}" for name, count in trend["primary_failure_categories"].items())
         )
+    if trend.get("primary_failure_subcategories"):
+        print(
+            "Failure subcategories: "
+            + ", ".join(f"{name}={count}" for name, count in trend["primary_failure_subcategories"].items())
+        )
     if trend.get("failure_category_breakdown"):
         summary_parts: list[str] = []
         for category, breakdown in trend["failure_category_breakdown"].items():
@@ -275,6 +280,37 @@ def _print_summary_text_output(
                 f"{category}(runs={breakdown.get('run_count')}; commands={command_summary}; nodes={terminal_summary})"
             )
         print("Failure breakdown: " + "; ".join(summary_parts))
+    if trend.get("failure_subcategory_breakdown"):
+        summary_parts = []
+        for subcategory, breakdown in trend["failure_subcategory_breakdown"].items():
+            category_summary = ", ".join(
+                f"{item['category']}={item['count']}" for item in breakdown.get("primary_categories", [])
+            ) or "none"
+            summary_parts.append(
+                f"{subcategory}(runs={breakdown.get('run_count')}; categories={category_summary})"
+            )
+        print("Failure subcategory breakdown: " + "; ".join(summary_parts))
+    if trend.get("retry_policy_stop_reasons"):
+        print(
+            "Retry stop reasons: "
+            + ", ".join(f"{name}={count}" for name, count in trend["retry_policy_stop_reasons"].items())
+        )
+    if trend.get("sandbox_fallback_reasons"):
+        print(
+            "Sandbox fallback reasons: "
+            + ", ".join(f"{name}={count}" for name, count in trend["sandbox_fallback_reasons"].items())
+        )
+    dashboard = trend.get("dashboard") if isinstance(trend.get("dashboard"), dict) else {}
+    if dashboard:
+        print(
+            "Dashboard summary: "
+            f"latest_failure={dashboard.get('latest_failure_category') or 'none'}"
+            f"/{dashboard.get('latest_failure_subcategory') or 'none'}, "
+            f"dominant_failure={dashboard.get('dominant_failure_category') or 'none'}"
+            f"/{dashboard.get('dominant_failure_subcategory') or 'none'}, "
+            f"retry_stop_rate={dashboard.get('retry_stop_rate', 0.0):.2f}, "
+            f"sandbox_fallback_rate={dashboard.get('sandbox_fallback_rate', 0.0):.2f}"
+        )
     if trend.get("top_terminal_nodes"):
         print(
             "Top terminal nodes: "
@@ -349,7 +385,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
             print(json.dumps(row, ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -360,6 +396,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
                         "run_id",
                         "status",
                         "primary_failure",
+                        "failure_subcategory",
                         "validation_strategy",
                         "retry_recovered",
                         "skipped_command_count",
@@ -405,6 +442,8 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     print(f"Terminal node: {workflow.get('terminal_node')}")
     if failures.get("primary_category"):
         print(f"Primary failure category: {failures.get('primary_category')}")
+    if failures.get("subcategory"):
+        print(f"Failure subcategory: {failures.get('subcategory')}")
     if isinstance(testing.get("validation_strategy"), str):
         print(f"Validation strategy: {testing.get('validation_strategy')}")
     if effectiveness.get("retry_attempted"):
@@ -490,7 +529,7 @@ def _print_export_output(
             print(json.dumps(_diagnostics_row(metrics, path), ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for metrics, path in metrics_entries:
             row = _diagnostics_row(metrics, path)
             print(
@@ -500,6 +539,7 @@ def _print_export_output(
                         "run_id",
                         "status",
                         "primary_failure",
+                        "failure_subcategory",
                         "validation_strategy",
                         "retry_recovered",
                         "skipped_command_count",
@@ -524,6 +564,7 @@ def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
+        "failure_subcategory": failures.get("subcategory") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
         "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
         "skipped_command_count": testing.get("skipped_command_count") or 0,

@@ -15,14 +15,14 @@ Current status:
 3. Next.js and NestJS workflows are supported with committed smoke fixtures and full validation coverage.
 4. Retrieval is hybrid and explainable through candidate reasons, explanation edges, graph seed files, and structured `edit_intent`.
 5. Review-driven remediation, tester `targeted_retry`, adaptive retry-policy selection from recent run history, and retry-effectiveness diagnostics are implemented and validated.
-6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, retry recovery reporting, provider-aware issue/PR workflow publishing, and richer retry-policy stop decisions based on recent run history.
+6. Team-safety controls now include file edit policy enforcement, structured review summaries, audit trails, retry recovery reporting, provider-aware issue/PR workflow publishing, richer retry-policy stop decisions based on recent run history, and operator-facing failure taxonomy with dashboard-ready diagnostics.
 
 Future:
 
 - Further GitHub and Azure DevOps workflow support, including richer branch policies, linking, and PR metadata.
 - Better sandbox backends, including stronger remote or production-like execution options.
 - Further retry orchestration tuning based on larger historical windows, operator feedback, and richer stop/continue policies.
-- Higher-level operator diagnostics such as dashboard-oriented summaries and richer failure comparisons.
+- Better operator diagnostics on top of the current dashboard-oriented summaries, including richer comparisons and downstream reporting surfaces.
 - Final product-baseline hardening toward `v1.0.0`, including more stable multi-stack support, onboarding, and operational guidance.
 
 ## Architecture Highlights
@@ -194,5 +194,5 @@ Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner beha
 9. Run `python artifact/run_retry_strategy_benchmark.py` to compare full validation plans versus targeted retry plans on the committed framework fixtures.
 10. Run `python -m ai_code_agent.validation --mode quick` for the fast local loop, or `python -m ai_code_agent.validation --mode full` to execute the full developer validation suite including NestJS and Next.js smoke fixtures. The same modes also work through `poetry run ai-code-agent-validate --mode ...`.
 11. Use `AGENT_EDIT_ALLOW_GLOBS=src/**,docs/**` and/or `AGENT_EDIT_DENY_GLOBS=artifact/fixtures/**,.github/workflows/**` when you need policy-based file restrictions for team-safe editing.
-12. Run `python -m ai_code_agent.main diagnose --repo <path>` to inspect the latest persisted workflow metrics artifact plus recent-run trends, add `--run-id <id>` for a specific run, use `--status` / `--failure-category` to narrow the recent-run view, use `--format json|ndjson|rows` for export-friendly output, and let all diagnose formats, including the default text view, reuse fresh persisted recent-run snapshots under `.ai-code-agent/diagnostics/` when they match the requested window and filters. Diagnose output now also surfaces tester validation strategy data such as `full` versus `targeted_retry`, per-run retry recovery and command reduction, and trend summaries for remediation recovery plus targeted-retry savings.
+12. Run `python -m ai_code_agent.main diagnose --repo <path>` to inspect the latest persisted workflow metrics artifact plus recent-run trends, add `--run-id <id>` for a specific run, use `--status` / `--failure-category` to narrow the recent-run view, use `--format json|ndjson|rows` for export-friendly output, and let all diagnose formats, including the default text view, reuse fresh persisted recent-run snapshots under `.ai-code-agent/diagnostics/` when they match the requested window and filters. Diagnose output now also surfaces tester validation strategy data such as `full` versus `targeted_retry`, per-run retry recovery and command reduction, failure subcategories, retry stop reasons, sandbox fallback reasons, and dashboard-oriented summaries for dominant recent failure patterns.
 13. GitHub Actions validation now uploads the `.ai-code-agent/` directory as a build artifact, including the validation log under `.ai-code-agent/ci/`, any persisted run metrics under `.ai-code-agent/runs/`, and a CI summary file that links to generated diagnostics snapshots when metrics are present.

@@ -177,6 +177,7 @@ Current progress:
 8. GitHub issue URLs and Azure DevOps work item URLs can now be resolved into issue context before planning, and successful auto-push runs can publish provider-specific PRs plus source-thread comments when credentials are configured.
 9. Sandbox backend negotiation now supports `auto`, `docker`, `local`, and `docker_required`, while testing metrics record the resolved backend and fallback reason for operator diagnostics.
 10. Retry-policy tuning now records confidence and history-based stop reasons, and can stop another remediation loop when both available strategies show low recovery probability in recent history.
+11. Diagnostics now expose failure subcategories, retry stop reason counts, sandbox fallback counts, and dashboard-style recent-run summaries for operator triage.
 
 Release notes:
 1. Bumps the package baseline to `0.9.0`.
@@ -186,6 +187,7 @@ Release notes:
 5. Adds provider-aware issue enrichment and remote PR publishing for GitHub and Azure DevOps workflows.
 6. Adds inspectable sandbox backend negotiation with fallback diagnostics for local versus Docker execution.
 7. Adds richer retry-policy confidence and low-recovery stop signals for more selective remediation loops.
+8. Adds operator-facing failure taxonomy details and dashboard-oriented diagnostics summaries to persisted metrics and `diagnose` output.
 
 Features:
 1. CI integration

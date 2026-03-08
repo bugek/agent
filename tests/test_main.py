@@ -45,7 +45,7 @@ class MainCliTest(unittest.TestCase):
                 "schema_version": "execution-metrics/v1",
                 "run_id": "run-123",
                 "workflow": {"status": "changes_required", "attempt_count": 2, "duration_ms": 1234, "terminal_node": "review"},
-                "failures": {"primary_category": "validation"},
+                "failures": {"primary_category": "validation", "subcategory": "command:script:build"},
                 "testing": {
                     "failed_commands": ["script:build"],
                     "total_duration_ms": 1100,
@@ -69,6 +69,7 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Run ID: run-123", rendered)
             self.assertIn("Metrics artifact: .ai-code-agent/runs/run-123/metrics.json", rendered)
             self.assertIn("Primary failure category: validation", rendered)
+            self.assertIn("Failure subcategory: command:script:build", rendered)
             self.assertIn("Validation strategy: targeted_retry", rendered)
             self.assertIn("Retry recovered: False", rendered)
             self.assertIn("Remediation applied: True", rendered)
@@ -114,7 +115,7 @@ class MainCliTest(unittest.TestCase):
                 "schema_version": "execution-metrics/v1",
                 "run_id": "run-2",
                 "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 200, "terminal_node": "review"},
-                "failures": {"primary_category": "generation"},
+                "failures": {"primary_category": "generation", "subcategory": "generation_failure"},
                 "testing": {
                     "failed_commands": [],
                     "total_duration_ms": 80,
@@ -133,7 +134,7 @@ class MainCliTest(unittest.TestCase):
                 "schema_version": "execution-metrics/v1",
                 "run_id": "run-3",
                 "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
-                "failures": {"primary_category": "validation"},
+                "failures": {"primary_category": "validation", "subcategory": "command:script:test"},
                 "testing": {
                     "failed_commands": ["script:test"],
                     "total_duration_ms": 200,
@@ -177,7 +178,10 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Targeted retry savings: runs=1, approved=0, success_rate=0.00, skipped_commands=3, avg_skipped=3, avg_reduction_rate=0.60", rendered)
             self.assertIn("Strategy comparison: full(runs=2, success_rate=1.00, avg_testing_ms=60) ; targeted_retry(runs=1, success_rate=0.00, avg_testing_ms=200) ; delta(success_rate=-1.00, testing_ms=140, reduction_rate=0.60)", rendered)
             self.assertIn("Primary failure categories: generation=1, validation=1", rendered)
+            self.assertIn("Failure subcategories: command:script:test=1, generation_failure=1", rendered)
             self.assertIn("Failure breakdown: generation(runs=1; commands=none; nodes=review=1); validation(runs=1; commands=script:test=1; nodes=test=1)", rendered)
+            self.assertIn("Failure subcategory breakdown: command:script:test(runs=1; categories=validation=1); generation_failure(runs=1; categories=generation=1)", rendered)
+            self.assertIn("Dashboard summary: latest_failure=validation/command:script:test, dominant_failure=validation/generation_failure, retry_stop_rate=0.00, sandbox_fallback_rate=0.00", rendered)
             self.assertIn("Top terminal nodes: review=2, test=1", rendered)
             self.assertIn("Top failing commands: script:test=1", rendered)
             self.assertIn("Top slowest commands: script:test avg=150 max=150 count=1, script:lint avg=60 max=60 count=1, compileall avg=36 max=50 count=3", rendered)
@@ -223,7 +227,7 @@ class MainCliTest(unittest.TestCase):
                 "schema_version": "execution-metrics/v1",
                 "run_id": "run-2",
                 "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 200, "terminal_node": "review"},
-                "failures": {"primary_category": "generation"},
+                "failures": {"primary_category": "generation", "subcategory": "generation_failure"},
                 "testing": {
                     "failed_commands": [],
                     "total_duration_ms": 80,
@@ -242,7 +246,7 @@ class MainCliTest(unittest.TestCase):
                 "schema_version": "execution-metrics/v1",
                 "run_id": "run-3",
                 "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
-                "failures": {"primary_category": "validation"},
+                "failures": {"primary_category": "validation", "subcategory": "command:script:test"},
                 "testing": {
                     "failed_commands": ["script:test"],
                     "total_duration_ms": 200,
@@ -287,9 +291,14 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry"]["average_command_reduction_rate"], 0.6)
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry_vs_full"]["success_rate_delta"], -1.0)
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry_vs_full"]["testing_duration_ms_delta"], 140)
+            self.assertEqual(payload["trend"]["primary_failure_subcategories"], {"command:script:test": 1, "generation_failure": 1})
             self.assertEqual(payload["trend"]["failure_category_breakdown"]["generation"]["run_count"], 1)
+            self.assertEqual(payload["trend"]["failure_subcategory_breakdown"]["command:script:test"]["primary_categories"][0], {"category": "validation", "count": 1})
             self.assertEqual(payload["trend"]["failure_category_breakdown"]["generation"]["terminal_nodes"][0], {"node": "review", "count": 1})
             self.assertEqual(payload["trend"]["failure_category_breakdown"]["validation"]["failing_commands"][0], {"label": "script:test", "count": 1})
+            self.assertEqual(payload["trend"]["dashboard"]["latest_failure_subcategory"], "command:script:test")
+            self.assertEqual(payload["trend"]["dashboard"]["dominant_failure_category"], "validation")
+            self.assertEqual(payload["trend"]["dashboard"]["dominant_failure_subcategory"], "generation_failure")
             self.assertEqual(payload["trend"]["top_terminal_nodes"][0], {"node": "review", "count": 2})
             self.assertEqual(payload["trend"]["top_terminal_nodes"][1], {"node": "test", "count": 1})
             self.assertEqual(payload["trend"]["top_failing_commands"][0], {"label": "script:test", "count": 1})
@@ -338,8 +347,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
-            self.assertIn("run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath", rendered)
-            self.assertIn("run-rows\tapproved\t\ttargeted_retry\tTrue\t2\t0.5\t150\t50\treview\t.ai-code-agent/runs/run-rows/metrics.json", rendered)
+            self.assertIn("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath", rendered)
+            self.assertIn("run-rows\tapproved\t\t\ttargeted_retry\tTrue\t2\t0.5\t150\t50\treview\t.ai-code-agent/runs/run-rows/metrics.json", rendered)
 
     def test_run_diagnostics_skips_aborted_runs_in_comparison_baselines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -543,8 +552,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\tfull\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\t\tfull\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_supports_ndjson_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -618,8 +627,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\tfull\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\tcommand:compileall\tfull\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_reuses_fresh_summary_snapshot_for_json_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
