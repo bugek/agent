@@ -136,7 +136,7 @@ Runtime version matrix for CI, local validation, and committed fixtures lives in
 - `artifact/runtime_matrix.md`: Runtime compatibility matrix covering Python, CI Node, and framework fixture minimums plus the reason each version is pinned.
 - `artifact/run_retrieval_eval.py`: Benchmark runner that compares `baseline` and `hybrid` retrieval modes.
 - `artifact/fixtures/retrieval-eval-sample/`: Sample repository for retrieval benchmarking across backend and frontend cases.
-- `ai_code_agent/validation.py`: Single entrypoint that runs compile checks, unit tests, framework smoke checks, and retrieval evaluation in sequence.
+- `ai_code_agent/validation.py`: Single entrypoint that supports `quick` and `full` validation modes. `full` runs compile checks, unit tests, framework smoke checks, and retrieval evaluation; `quick` runs compile plus unit tests only.
 - `.github/workflows/validation.yml`: GitHub Actions workflow that runs the unified validation suite on `push` and `pull_request`.
 
 Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner behavior. The benchmark reports precision@k, recall@k, reciprocal rank, and NDCG@k.
@@ -151,4 +151,4 @@ Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner beha
 6. Run the CLI without API keys to use fallback mode for planning and smoke-test execution only.
 7. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.
 8. Run `python artifact/run_retrieval_eval.py` to compare baseline and hybrid retrieval quality on the committed fixture.
-9. Run `python -m ai_code_agent.validation` or `poetry run ai-code-agent-validate` to execute the combined developer validation suite, including NestJS and Next.js smoke fixtures.
+9. Run `python -m ai_code_agent.validation --mode quick` for the fast local loop, or `python -m ai_code_agent.validation --mode full` to execute the full developer validation suite including NestJS and Next.js smoke fixtures. The same modes also work through `poetry run ai-code-agent-validate --mode ...`.

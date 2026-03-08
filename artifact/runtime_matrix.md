@@ -25,3 +25,9 @@ This document defines the runtime versions that matter for local development, co
 - If you only run the NestJS smoke fixture locally, Node 20+ is sufficient.
 - If you run the Next.js visual-review fixture locally, use Node 20.9+ or newer.
 - If you run the full repository validation suite locally, Node 22 is the safest default because it matches CI and satisfies both fixtures.
+
+## Validation Modes
+
+- `python -m ai_code_agent.validation --mode quick`: local fast loop for compile plus unit tests only.
+- `python -m ai_code_agent.validation --mode full`: full validation path used by CI, including NestJS smoke, Next.js visual-review smoke, and retrieval evaluation.
+- `.github/workflows/validation.yml` is expected to call `--mode full` explicitly so CI behavior does not depend on CLI defaults.

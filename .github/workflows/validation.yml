@@ -25,4 +25,4 @@ jobs:
           node-version: '22'
 
       - name: Run validation suite
-        run: python -m ai_code_agent.validation
+        run: python -m ai_code_agent.validation --mode full
