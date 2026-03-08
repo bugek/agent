@@ -44,6 +44,7 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["retrieval_strategy"], "hybrid")
         self.assertEqual(event["details"]["blocked_files_to_edit"], 1)
         self.assertEqual(event["details"]["graph_seed_files"], 2)
+        self.assertEqual(event["details"]["edit_intent_count"], 0)
         self.assertEqual(result["execution_metrics"]["planning"]["blocked_file_count"], 1)
 
     def test_code_node_records_codegen_decision_details(self) -> None:
@@ -152,6 +153,12 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         tester_result = {
             "test_passed": False,
             "test_results": "compileall(exit=1):\nboom\n",
+            "testing_summary": {
+                "validation_strategy": "targeted_retry",
+                "selected_command_labels": ["compileall"],
+                "skipped_command_labels": ["script:test"],
+                "requested_retry_labels": ["script:test"],
+            },
             "visual_review": None,
         }
 
@@ -217,6 +224,10 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["node"], "test")
         self.assertEqual(event["status"], "failed")
         self.assertEqual(event["attempt"], 2)
+        self.assertEqual(event["details"]["validation_strategy"], "targeted_retry")
+        self.assertEqual(event["details"]["selected_command_count"], 1)
+        self.assertEqual(event["details"]["skipped_command_count"], 1)
+        self.assertEqual(event["details"]["requested_retry_count"], 1)
         self.assertEqual(result["execution_metrics"]["testing"]["status"], "failed")
 
 

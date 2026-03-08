@@ -37,6 +37,8 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "applied_operations": 2,
                     "failed_operations": ["replace_text failed for missing.ts"],
                     "blocked_operations": [{"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule"}],
+                    "remediation_applied": True,
+                    "remediation_focus_count": 2,
                 },
                 "test_results": "compileall(exit=0):\n\nscript:build(exit=1):\nboom\n\nlint:\n[app/page.tsx] warning\n",
                 "test_passed": False,
@@ -98,6 +100,7 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["planning"]["candidate_file_count"], 2)
         self.assertEqual(metrics["planning"]["edit_intent_count"], 1)
         self.assertEqual(metrics["coding"]["blocked_operation_count"], 1)
+        self.assertEqual(metrics["coding"]["remediation_focus_count"], 2)
         self.assertEqual(metrics["testing"]["failed_commands"], ["script:build"])
         self.assertEqual(metrics["testing"]["lint_issue_count"], 1)
         self.assertEqual(metrics["testing"]["total_duration_ms"], 1100)
@@ -105,10 +108,19 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["selected_command_count"], 1)
         self.assertEqual(metrics["testing"]["skipped_command_count"], 1)
         self.assertEqual(metrics["testing"]["requested_retry_labels"], ["script:build"])
+        self.assertEqual(metrics["testing"]["command_reduction_rate"], 0.5)
         self.assertEqual(metrics["testing"]["slowest_command"]["label"], "script:build")
         self.assertEqual(metrics["testing"]["commands"][1]["duration_ms"], 980)
         self.assertEqual(metrics["testing"]["visual_review"]["missing_state_count"], 2)
         self.assertEqual(metrics["review"]["validation_failed_count"], 1)
+        self.assertEqual(metrics["review"]["remediation_required"], False)
+        self.assertEqual(metrics["effectiveness"]["retry_attempted"], True)
+        self.assertEqual(metrics["effectiveness"]["retry_recovered"], False)
+        self.assertEqual(metrics["effectiveness"]["remediation_applied"], True)
+        self.assertEqual(metrics["effectiveness"]["edit_intent_used"], True)
+        self.assertEqual(metrics["effectiveness"]["targeted_retry_used"], True)
+        self.assertEqual(metrics["effectiveness"]["command_reduction_count"], 1)
+        self.assertEqual(metrics["effectiveness"]["command_reduction_rate"], 0.5)
         self.assertEqual(metrics["failures"]["primary_category"], "policy")
         self.assertEqual(metrics["phases"]["test"]["status"], "failed")
         self.assertEqual(metrics["phases"]["test"]["duration_ms"], 37000)

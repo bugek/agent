@@ -89,6 +89,8 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "blocked_operation_count": _count_items(codegen_summary.get("blocked_operations")),
             "patch_count": _count_items(state.get("patches")),
             "changed_file_count": len(distinct_changed_files),
+            "remediation_applied": bool(codegen_summary.get("remediation_applied")),
+            "remediation_focus_count": _as_int(codegen_summary.get("remediation_focus_count")),
         },
         "testing": {
             "status": _testing_status(state, test_signals),
@@ -105,6 +107,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "requested_retry_labels": [
                 label for label in testing_summary.get("requested_retry_labels", []) if isinstance(label, str) and label
             ] if isinstance(testing_summary.get("requested_retry_labels"), list) else [],
+            "command_reduction_rate": _command_reduction_rate(testing_summary),
             "visual_review": _visual_review_metrics(visual_review),
         },
         "review": {
@@ -114,6 +117,18 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "residual_risk_count": _count_items(review_summary.get("residual_risks")),
             "changed_area_count": _count_items(review_summary.get("changed_areas")),
             "validation_failed_count": _count_items((review_summary.get("validation") or {}).get("failed")),
+            "remediation_required": bool((review_summary.get("remediation") or {}).get("required")),
+        },
+        "effectiveness": {
+            "retry_attempted": _as_int(state.get("retry_count")) > 0,
+            "retry_recovered": _as_int(state.get("retry_count")) > 0 and bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)),
+            "remediation_applied": bool(codegen_summary.get("remediation_applied")),
+            "remediation_recovered": bool(codegen_summary.get("remediation_applied")) and bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)),
+            "edit_intent_used": _count_items(planning_context.get("edit_intent")) > 0,
+            "edit_intent_recovered": _count_items(planning_context.get("edit_intent")) > 0 and bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)),
+            "targeted_retry_used": (testing_summary.get("validation_strategy") or "full") == "targeted_retry",
+            "command_reduction_count": _count_items(testing_summary.get("skipped_command_labels")),
+            "command_reduction_rate": _command_reduction_rate(testing_summary),
         },
         "failures": {
             "has_failure": not (bool(state.get("review_approved", False)) and bool(state.get("test_passed", False))),
@@ -287,6 +302,23 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "average_testing_duration_ms": 0,
             "primary_failure_categories": {},
             "validation_strategies": {},
+            "effectiveness": {
+                "retry_runs": 0,
+                "retry_recovered_runs": 0,
+                "retry_recovery_rate": 0.0,
+                "remediation_runs": 0,
+                "remediation_recovered_runs": 0,
+                "remediation_recovery_rate": 0.0,
+                "edit_intent_runs": 0,
+                "edit_intent_recovered_runs": 0,
+                "edit_intent_recovery_rate": 0.0,
+                "targeted_retry_runs": 0,
+                "targeted_retry_approved_runs": 0,
+                "targeted_retry_success_rate": 0.0,
+                "targeted_retry_total_skipped_commands": 0,
+                "targeted_retry_average_skipped_commands": 0,
+                "targeted_retry_average_reduction_rate": 0.0,
+            },
             "failure_category_breakdown": {},
             "slowest_commands": [],
             "top_terminal_nodes": [],
@@ -332,12 +364,27 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
     validation_strategy_counts: dict[str, int] = {}
+    retry_runs = 0
+    retry_recovered_runs = 0
+    remediation_runs = 0
+    remediation_recovered_runs = 0
+    edit_intent_runs = 0
+    edit_intent_recovered_runs = 0
+    targeted_retry_runs = 0
+    targeted_retry_approved_runs = 0
+    targeted_retry_total_skipped_commands = 0
+    targeted_retry_total_reduction_rate = 0.0
     for metrics, _ in metrics_entries:
         workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+        planning = metrics.get("planning") if isinstance(metrics.get("planning"), dict) else {}
+        coding = metrics.get("coding") if isinstance(metrics.get("coding"), dict) else {}
         testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
         failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
         status = workflow.get("status")
         terminal_node = workflow.get("terminal_node")
+        attempt_count = _as_int(workflow.get("attempt_count"))
+        remediation_applied = bool(coding.get("remediation_applied"))
+        edit_intent_used = _as_int(planning.get("edit_intent_count")) > 0
 
         if status == "aborted":
             aborted_count += 1
@@ -369,6 +416,24 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         validation_strategy = testing.get("validation_strategy")
         if isinstance(validation_strategy, str) and validation_strategy:
             validation_strategy_counts[validation_strategy] = validation_strategy_counts.get(validation_strategy, 0) + 1
+        if attempt_count > 1:
+            retry_runs += 1
+            if status == "approved":
+                retry_recovered_runs += 1
+        if remediation_applied:
+            remediation_runs += 1
+            if status == "approved":
+                remediation_recovered_runs += 1
+        if edit_intent_used:
+            edit_intent_runs += 1
+            if status == "approved":
+                edit_intent_recovered_runs += 1
+        if validation_strategy == "targeted_retry":
+            targeted_retry_runs += 1
+            targeted_retry_total_skipped_commands += _as_int(testing.get("skipped_command_count"))
+            targeted_retry_total_reduction_rate += _as_float(testing.get("command_reduction_rate"))
+            if status == "approved":
+                targeted_retry_approved_runs += 1
         for failed_command in failed_commands:
             if not isinstance(failed_command, str) or not failed_command:
                 continue
@@ -512,6 +577,23 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "average_testing_duration_ms": int(total_testing_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "primary_failure_categories": dict(sorted(failure_categories.items())),
         "validation_strategies": dict(sorted(validation_strategy_counts.items())),
+        "effectiveness": {
+            "retry_runs": retry_runs,
+            "retry_recovered_runs": retry_recovered_runs,
+            "retry_recovery_rate": round(retry_recovered_runs / retry_runs, 2) if retry_runs else 0.0,
+            "remediation_runs": remediation_runs,
+            "remediation_recovered_runs": remediation_recovered_runs,
+            "remediation_recovery_rate": round(remediation_recovered_runs / remediation_runs, 2) if remediation_runs else 0.0,
+            "edit_intent_runs": edit_intent_runs,
+            "edit_intent_recovered_runs": edit_intent_recovered_runs,
+            "edit_intent_recovery_rate": round(edit_intent_recovered_runs / edit_intent_runs, 2) if edit_intent_runs else 0.0,
+            "targeted_retry_runs": targeted_retry_runs,
+            "targeted_retry_approved_runs": targeted_retry_approved_runs,
+            "targeted_retry_success_rate": round(targeted_retry_approved_runs / targeted_retry_runs, 2) if targeted_retry_runs else 0.0,
+            "targeted_retry_total_skipped_commands": targeted_retry_total_skipped_commands,
+            "targeted_retry_average_skipped_commands": int(targeted_retry_total_skipped_commands / targeted_retry_runs) if targeted_retry_runs else 0,
+            "targeted_retry_average_reduction_rate": round(targeted_retry_total_reduction_rate / targeted_retry_runs, 2) if targeted_retry_runs else 0.0,
+        },
         "failure_category_breakdown": {
             category: {
                 "run_count": breakdown["run_count"],
@@ -621,11 +703,15 @@ def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, An
     workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
     failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
     testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    effectiveness = metrics.get("effectiveness") if isinstance(metrics.get("effectiveness"), dict) else {}
     return {
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
+        "skipped_command_count": testing.get("skipped_command_count") or 0,
+        "command_reduction_rate": _as_float(testing.get("command_reduction_rate")),
         "duration_ms": workflow.get("duration_ms") or 0,
         "testing_duration_ms": testing.get("total_duration_ms") or 0,
         "terminal_node": workflow.get("terminal_node") or "",
@@ -783,6 +869,15 @@ def _testing_command_summaries(testing_summary: dict[str, Any]) -> list[dict[str
     return summaries
 
 
+def _command_reduction_rate(testing_summary: dict[str, Any]) -> float:
+    selected_count = _count_items(testing_summary.get("selected_command_labels"))
+    skipped_count = _count_items(testing_summary.get("skipped_command_labels"))
+    total_count = selected_count + skipped_count
+    if total_count <= 0:
+        return 0.0
+    return round(skipped_count / total_count, 2)
+
+
 def _extract_validation_signals(test_results: str) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
     for match in re.finditer(r"^([A-Za-z0-9:_-]+)\(exit=(\d+)\):", test_results or "", re.M):
@@ -885,6 +980,10 @@ def _count_mapping_entries(value: Any) -> int:
 
 def _as_int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _as_float(value: Any) -> float:
+    return round(float(value), 2) if isinstance(value, (int, float)) and value >= 0 else 0.0
 
 
 def _first_timestamp(execution_events: list[dict[str, Any]]) -> str | None:

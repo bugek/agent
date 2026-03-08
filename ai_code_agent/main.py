@@ -225,6 +225,26 @@ def _print_summary_text_output(
             "Validation strategies: "
             + ", ".join(f"{name}={count}" for name, count in trend["validation_strategies"].items())
         )
+    effectiveness = trend.get("effectiveness") if isinstance(trend.get("effectiveness"), dict) else {}
+    if effectiveness:
+        print(
+            f"Retry recovery: {effectiveness.get('retry_recovered_runs', 0)}/{effectiveness.get('retry_runs', 0)} ({effectiveness.get('retry_recovery_rate', 0.0):.2f})"
+        )
+        print(
+            f"Remediation recovery: {effectiveness.get('remediation_recovered_runs', 0)}/{effectiveness.get('remediation_runs', 0)} ({effectiveness.get('remediation_recovery_rate', 0.0):.2f})"
+        )
+        print(
+            f"Edit intent recovery: {effectiveness.get('edit_intent_recovered_runs', 0)}/{effectiveness.get('edit_intent_runs', 0)} ({effectiveness.get('edit_intent_recovery_rate', 0.0):.2f})"
+        )
+        print(
+            "Targeted retry savings: "
+            f"runs={effectiveness.get('targeted_retry_runs', 0)}, "
+            f"approved={effectiveness.get('targeted_retry_approved_runs', 0)}, "
+            f"success_rate={effectiveness.get('targeted_retry_success_rate', 0.0):.2f}, "
+            f"skipped_commands={effectiveness.get('targeted_retry_total_skipped_commands', 0)}, "
+            f"avg_skipped={effectiveness.get('targeted_retry_average_skipped_commands', 0)}, "
+            f"avg_reduction_rate={effectiveness.get('targeted_retry_average_reduction_rate', 0.0):.2f}"
+        )
     if trend["primary_failure_categories"]:
         print(
             "Primary failure categories: "
@@ -317,7 +337,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
             print(json.dumps(row, ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -329,6 +349,9 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
                         "status",
                         "primary_failure",
                         "validation_strategy",
+                        "retry_recovered",
+                        "skipped_command_count",
+                        "command_reduction_rate",
                         "duration_ms",
                         "testing_duration_ms",
                         "terminal_node",
@@ -361,6 +384,7 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     failures = metrics.get("failures") or {}
     testing = metrics.get("testing") or {}
     review = metrics.get("review") or {}
+    effectiveness = metrics.get("effectiveness") or {}
     print(f"Run ID: {metrics.get('run_id') or '<unknown>'}")
     print(f"Metrics artifact: {metrics_path}")
     print(f"Workflow status: {workflow.get('status')}")
@@ -371,6 +395,10 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
         print(f"Primary failure category: {failures.get('primary_category')}")
     if isinstance(testing.get("validation_strategy"), str):
         print(f"Validation strategy: {testing.get('validation_strategy')}")
+    if effectiveness.get("retry_attempted"):
+        print(f"Retry recovered: {effectiveness.get('retry_recovered')}")
+    if effectiveness.get("remediation_applied"):
+        print(f"Remediation applied: {effectiveness.get('remediation_applied')}")
     failed_commands = testing.get("failed_commands") or []
     if failed_commands:
         print(f"Failed commands: {', '.join(failed_commands)}")
@@ -380,6 +408,9 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     skipped_command_count = testing.get("skipped_command_count")
     if isinstance(skipped_command_count, int) and skipped_command_count > 0:
         print(f"Skipped commands on this pass: {skipped_command_count}")
+    command_reduction_rate = testing.get("command_reduction_rate")
+    if isinstance(command_reduction_rate, (int, float)) and command_reduction_rate > 0:
+        print(f"Command reduction rate: {command_reduction_rate:.2f}")
     slowest_command = testing.get("slowest_command") or {}
     if slowest_command.get("label"):
         print(
@@ -447,7 +478,7 @@ def _print_export_output(
             print(json.dumps(_diagnostics_row(metrics, path), ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for metrics, path in metrics_entries:
             row = _diagnostics_row(metrics, path)
             print(
@@ -458,6 +489,9 @@ def _print_export_output(
                         "status",
                         "primary_failure",
                         "validation_strategy",
+                        "retry_recovered",
+                        "skipped_command_count",
+                        "command_reduction_rate",
                         "duration_ms",
                         "testing_duration_ms",
                         "terminal_node",
@@ -473,11 +507,15 @@ def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
     workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
     failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
     testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    effectiveness = metrics.get("effectiveness") if isinstance(metrics.get("effectiveness"), dict) else {}
     return {
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
+        "skipped_command_count": testing.get("skipped_command_count") or 0,
+        "command_reduction_rate": testing.get("command_reduction_rate") or 0.0,
         "duration_ms": workflow.get("duration_ms") or 0,
         "testing_duration_ms": testing.get("total_duration_ms") or 0,
         "terminal_node": workflow.get("terminal_node") or "",

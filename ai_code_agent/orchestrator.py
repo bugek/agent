@@ -178,6 +178,7 @@ def plan_node(state: AgentState) -> dict[str, Any]:
             "retrieval_strategy": planning_context.get("retrieval_strategy"),
             "blocked_files_to_edit": len(planning_context.get("blocked_files_to_edit", [])),
             "graph_seed_files": len(planning_context.get("graph_seed_files", [])),
+            "edit_intent_count": len(planning_context.get("edit_intent", [])),
         },
     )
     return _finalize_result(state, result)
@@ -229,7 +230,13 @@ def test_node(state: AgentState) -> dict[str, Any]:
         _event_state(current_state, result),
         "test",
         "passed" if result.get("test_passed", False) else "failed",
-        {"test_passed": result.get("test_passed", False)},
+        {
+            "test_passed": result.get("test_passed", False),
+            "validation_strategy": result.get("testing_summary", {}).get("validation_strategy") or "full",
+            "selected_command_count": len(result.get("testing_summary", {}).get("selected_command_labels", [])),
+            "skipped_command_count": len(result.get("testing_summary", {}).get("skipped_command_labels", [])),
+            "requested_retry_count": len(result.get("testing_summary", {}).get("requested_retry_labels", [])),
+        },
     )
     return _finalize_result(state, result)
 
@@ -264,6 +271,7 @@ def review_node(state: AgentState) -> dict[str, Any]:
             "residual_risks": len(result.get("review_summary", {}).get("residual_risks", [])),
             "remediation_required": bool(result.get("review_summary", {}).get("remediation", {}).get("required")),
             "remediation_focus_count": len(result.get("review_summary", {}).get("remediation", {}).get("focus_areas", [])),
+            "retry_recovered": approved and result.get("retry_count", current_state.get("retry_count", 0)) > 0,
         },
     )
     return _finalize_result(state, result)
