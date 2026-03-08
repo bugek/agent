@@ -16,6 +16,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "nextjs-visual-review"
 ARTIFACT_ROOT = Path(".ai-code-agent") / "visual-review"
 MANIFEST_PATH = ARTIFACT_ROOT / "manifest.json"
 SCREENSHOT_DIR = ARTIFACT_ROOT / "screenshots"
+REQUIRED_VIEWPORT_CATEGORIES = {"mobile", "desktop"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,6 +89,8 @@ def _collect_result(workspace_dir: Path) -> dict[str, object]:
     manifest = _load_manifest(manifest_file)
     artifacts = _artifact_paths_from_manifest(workspace_dir, manifest)
     screenshot_files = sorted(path.relative_to(workspace_dir).as_posix() for path in screenshot_dir.glob("**/*") if path.is_file())
+    viewport_categories = _viewport_categories_from_manifest(manifest)
+    missing_categories = sorted(REQUIRED_VIEWPORT_CATEGORIES.difference(viewport_categories))
 
     return {
         "manifest_path": manifest_file.relative_to(workspace_dir).as_posix() if manifest_file.exists() else None,
@@ -95,7 +98,9 @@ def _collect_result(workspace_dir: Path) -> dict[str, object]:
         "artifact_count": len(artifacts),
         "artifacts": artifacts,
         "screenshot_files": screenshot_files,
-        "passed": bool(manifest and artifacts and screenshot_files),
+        "viewport_categories": sorted(viewport_categories),
+        "missing_viewport_categories": missing_categories,
+        "passed": bool(manifest and artifacts and screenshot_files and not missing_categories),
     }
 
 
@@ -127,6 +132,32 @@ def _artifact_paths_from_manifest(workspace_dir: Path, manifest: dict[str, objec
         if artifact_path.exists() and artifact_path.is_file():
             resolved.append(artifact_path.relative_to(workspace_dir).as_posix())
     return resolved
+
+
+def _viewport_categories_from_manifest(manifest: dict[str, object] | None) -> set[str]:
+    if not isinstance(manifest, dict):
+        return set()
+    raw_artifacts = manifest.get("artifacts")
+    if not isinstance(raw_artifacts, list):
+        return set()
+
+    categories: set[str] = set()
+    for entry in raw_artifacts:
+        if not isinstance(entry, dict):
+            continue
+        viewport = entry.get("viewport")
+        if not isinstance(viewport, dict):
+            continue
+        width = viewport.get("width")
+        if not isinstance(width, int):
+            continue
+        if width < 768:
+            categories.add("mobile")
+        elif width >= 1024:
+            categories.add("desktop")
+        else:
+            categories.add("tablet")
+    return categories
 
 
 def main() -> int:

@@ -100,6 +100,17 @@ class ReviewerAgent(BaseAgent):
         elif screenshot_status == "not_configured":
             comments.append("Frontend screenshot review is not configured; relying on structural visual checks only.")
 
+        responsive_review = visual_review.get("responsive_review") or {}
+        missing_categories = responsive_review.get("missing_categories") or []
+        if screenshot_status == "passed" and missing_categories:
+            comments.append(
+                f"Frontend visual review is missing responsive viewport coverage for: {', '.join(missing_categories)}."
+            )
+
+        missing_viewport_metadata = responsive_review.get("missing_viewport_metadata") or []
+        if screenshot_status == "passed" and missing_viewport_metadata:
+            comments.append("Frontend visual review produced screenshots without viewport metadata, so responsive coverage could not be verified.")
+
         return comments
 
     def _visual_review_has_blockers(self, visual_review: object) -> bool:
@@ -109,4 +120,10 @@ class ReviewerAgent(BaseAgent):
         required_flags = ["loading_state", "empty_state", "error_state", "success_state", "loading_file", "error_file"]
         if any(not state_coverage.get(flag) for flag in required_flags):
             return True
+        responsive_review = visual_review.get("responsive_review") or {}
+        if visual_review.get("screenshot_status") == "passed":
+            if responsive_review.get("missing_categories"):
+                return True
+            if responsive_review.get("missing_viewport_metadata"):
+                return True
         return visual_review.get("screenshot_status") in {"failed", "missing_artifacts"}

@@ -5,6 +5,7 @@ VISUAL_REVIEW_ROOT = Path(".ai-code-agent") / "visual-review"
 VISUAL_REVIEW_MANIFEST_FILE = "manifest.json"
 VISUAL_REVIEW_SCREENSHOTS_DIR = "screenshots"
 VISUAL_REVIEW_SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+RESPONSIVE_REQUIRED_CATEGORIES = {"mobile", "desktop"}
 
 from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
@@ -258,6 +259,7 @@ class TesterAgent(BaseAgent):
             "artifact_count": artifact_metadata["artifact_count"],
             "artifacts": artifact_metadata["artifacts"],
             "artifact_summary": artifact_metadata["artifact_summary"],
+            "responsive_review": self._build_responsive_review(artifact_metadata["artifacts"], screenshot_status),
         }
 
     def _visual_review_command_signal(self, command_results: list[dict]) -> dict | None:
@@ -377,6 +379,40 @@ class TesterAgent(BaseAgent):
             "bytes": stat_result.st_size,
             "extension": file_path.suffix.lower(),
         }
+
+    def _build_responsive_review(self, artifacts: list[dict[str, object]], screenshot_status: str) -> dict[str, object]:
+        categories_present: set[str] = set()
+        missing_viewport_metadata: list[str] = []
+
+        for artifact in artifacts:
+            category = self._viewport_category(artifact.get("viewport"))
+            if category is not None:
+                categories_present.add(category)
+            elif artifact.get("kind") == "screenshot":
+                path = artifact.get("path")
+                if isinstance(path, str):
+                    missing_viewport_metadata.append(path)
+
+        missing_categories = sorted(RESPONSIVE_REQUIRED_CATEGORIES.difference(categories_present))
+        return {
+            "required_categories": sorted(RESPONSIVE_REQUIRED_CATEGORIES),
+            "categories_present": sorted(categories_present),
+            "missing_categories": missing_categories,
+            "missing_viewport_metadata": missing_viewport_metadata,
+            "passed": screenshot_status == "passed" and not missing_categories and not missing_viewport_metadata,
+        }
+
+    def _viewport_category(self, viewport: object) -> str | None:
+        if not isinstance(viewport, dict):
+            return None
+        width = viewport.get("width")
+        if not isinstance(width, int):
+            return None
+        if width < 768:
+            return "mobile"
+        if width >= 1024:
+            return "desktop"
+        return "tablet"
 
     def _relative_workspace_path(self, workspace_dir: str, target_path: Path) -> str:
         try:

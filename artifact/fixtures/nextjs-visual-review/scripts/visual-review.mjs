@@ -15,9 +15,20 @@ const startupTimeoutMs = Number(process.env.PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS || 
 const routes = [
   {
     route: "/",
-    title: "Home",
-    fileName: "home.png",
-    viewport: { width: 1440, height: 960 },
+    captures: [
+      {
+        title: "Home Desktop",
+        fileName: "home-desktop.png",
+        viewport: { width: 1440, height: 960 },
+        device: "desktop",
+      },
+      {
+        title: "Home Mobile",
+        fileName: "home-mobile.png",
+        viewport: { width: 393, height: 852 },
+        device: "mobile",
+      },
+    ],
   },
 ];
 
@@ -32,20 +43,23 @@ async function main() {
     const artifacts = [];
 
     for (const entry of routes) {
-      const page = await browser.newPage({ viewport: entry.viewport });
-      await page.goto(new URL(entry.route, baseUrl).toString(), { waitUntil: "networkidle" });
-      const outputPath = path.join(screenshotDir, entry.fileName);
-      await page.screenshot({ path: outputPath, fullPage: true });
+      for (const capture of entry.captures) {
+        const page = await browser.newPage({ viewport: capture.viewport });
+        await page.goto(new URL(entry.route, baseUrl).toString(), { waitUntil: "networkidle" });
+        const outputPath = path.join(screenshotDir, capture.fileName);
+        await page.screenshot({ path: outputPath, fullPage: true });
 
-      artifacts.push({
-        kind: "screenshot",
-        path: path.relative(artifactRoot, outputPath).split(path.sep).join("/"),
-        route: entry.route,
-        title: await page.title(),
-        status: page.url(),
-        viewport: entry.viewport,
-      });
-      await page.close();
+        artifacts.push({
+          kind: "screenshot",
+          path: path.relative(artifactRoot, outputPath).split(path.sep).join("/"),
+          route: entry.route,
+          title: await page.title(),
+          status: page.url(),
+          viewport: capture.viewport,
+          device: capture.device,
+        });
+        await page.close();
+      }
     }
 
     await browser.close();

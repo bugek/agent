@@ -45,16 +45,43 @@ class NextjsVisualReviewSmokeTest(unittest.TestCase):
             screenshots_dir = artifact_root / "screenshots"
             screenshots_dir.mkdir(parents=True)
             (screenshots_dir / "home.png").write_bytes(b"png-bytes")
+            (screenshots_dir / "home-mobile.png").write_bytes(b"png-bytes")
             (artifact_root / "manifest.json").write_text(
-                json.dumps({"artifacts": [{"path": "screenshots/home.png"}]}),
+                json.dumps(
+                    {
+                        "artifacts": [
+                            {"path": "screenshots/home.png", "viewport": {"width": 1440, "height": 960}},
+                            {"path": "screenshots/home-mobile.png", "viewport": {"width": 393, "height": 852}},
+                        ]
+                    }
+                ),
                 encoding="utf-8",
             )
 
             result = run_nextjs_visual_review_smoke._collect_result(workspace_dir)
 
             self.assertTrue(result["passed"])
-            self.assertEqual(result["artifact_count"], 1)
-            self.assertEqual(result["screenshot_files"], [".ai-code-agent/visual-review/screenshots/home.png"])
+            self.assertEqual(result["artifact_count"], 2)
+            self.assertEqual(result["viewport_categories"], ["desktop", "mobile"])
+            self.assertEqual(
+                result["screenshot_files"],
+                [
+                    ".ai-code-agent/visual-review/screenshots/home-mobile.png",
+                    ".ai-code-agent/visual-review/screenshots/home.png",
+                ],
+            )
+
+    def test_viewport_categories_require_mobile_and_desktop(self) -> None:
+        manifest = {
+            "artifacts": [
+                {"path": "screenshots/home.png", "viewport": {"width": 1440, "height": 960}},
+                {"path": "screenshots/home-mobile.png", "viewport": {"width": 393, "height": 852}},
+            ]
+        }
+
+        categories = run_nextjs_visual_review_smoke._viewport_categories_from_manifest(manifest)
+
+        self.assertEqual(categories, {"desktop", "mobile"})
 
 
 if __name__ == "__main__":

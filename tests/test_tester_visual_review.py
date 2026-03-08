@@ -47,8 +47,10 @@ class TestTesterVisualReview(unittest.TestCase):
             screenshot_path = artifact_root / "screenshots/dashboard-home.png"
             screenshot_path.parent.mkdir(parents=True, exist_ok=True)
             screenshot_path.write_bytes(b"png-bytes")
+            mobile_screenshot_path = artifact_root / "screenshots/dashboard-home-mobile.png"
+            mobile_screenshot_path.write_bytes(b"png-bytes")
             (artifact_root / "manifest.json").write_text(
-                '{"tool":"playwright","generated_at":"2026-03-08T00:00:00Z","artifacts":[{"path":"screenshots/dashboard-home.png","route":"/dashboard","title":"Dashboard","viewport":{"width":1440,"height":900}}]}',
+                '{"tool":"playwright","generated_at":"2026-03-08T00:00:00Z","artifacts":[{"path":"screenshots/dashboard-home.png","route":"/dashboard","title":"Dashboard","viewport":{"width":1440,"height":900}},{"path":"screenshots/dashboard-home-mobile.png","route":"/dashboard","title":"Dashboard Mobile","viewport":{"width":393,"height":852}}]}',
                 encoding="utf-8",
             )
             (temp_path / "components/dashboard/dashboard-shell.tsx").write_text(
@@ -81,10 +83,12 @@ class TestTesterVisualReview(unittest.TestCase):
 
             self.assertIsNotNone(visual_review)
             self.assertEqual(visual_review["screenshot_status"], "passed")
-            self.assertEqual(visual_review["artifact_count"], 1)
+            self.assertEqual(visual_review["artifact_count"], 2)
             self.assertEqual(visual_review["artifact_manifest"], ".ai-code-agent/visual-review/manifest.json")
             self.assertEqual(visual_review["artifacts"][0]["path"], ".ai-code-agent/visual-review/screenshots/dashboard-home.png")
             self.assertEqual(visual_review["artifacts"][0]["route"], "/dashboard")
+            self.assertTrue(visual_review["responsive_review"]["passed"])
+            self.assertEqual(visual_review["responsive_review"]["categories_present"], ["desktop", "mobile"])
             self.assertTrue(visual_review["state_coverage"]["loading_file"])
             self.assertTrue(visual_review["state_coverage"]["error_file"])
             self.assertTrue(visual_review["state_coverage"]["loading_state"])
@@ -130,6 +134,55 @@ class TestTesterVisualReview(unittest.TestCase):
 
             self.assertEqual(visual_review["screenshot_status"], "missing_artifacts")
             self.assertEqual(visual_review["artifact_count"], 0)
+
+    def test_build_visual_review_marks_missing_mobile_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "app/dashboard").mkdir(parents=True)
+            (temp_path / "components/dashboard").mkdir(parents=True)
+            artifact_root = temp_path / ".ai-code-agent/visual-review"
+            artifact_root.mkdir(parents=True)
+            (temp_path / "app/dashboard/page.tsx").write_text("export default function Page() { return null; }", encoding="utf-8")
+            (temp_path / "app/dashboard/loading.tsx").write_text("export default function Loading() { return null; }", encoding="utf-8")
+            (temp_path / "app/dashboard/error.tsx").write_text("export default function Error() { return null; }", encoding="utf-8")
+            screenshot_path = artifact_root / "screenshots/dashboard-home.png"
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            screenshot_path.write_bytes(b"png-bytes")
+            (artifact_root / "manifest.json").write_text(
+                '{"tool":"playwright","generated_at":"2026-03-08T00:00:00Z","artifacts":[{"path":"screenshots/dashboard-home.png","route":"/dashboard","title":"Dashboard","viewport":{"width":1440,"height":900}}]}',
+                encoding="utf-8",
+            )
+            (temp_path / "components/dashboard/dashboard-shell.tsx").write_text(
+                '\n'.join(
+                    [
+                        'const state = "ready";',
+                        'if (state === "loading") return null;',
+                        'if (state === "empty") return null;',
+                        'if (state === "error") return null;',
+                        'if (state === "ready") return null;',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            state = {
+                "workspace_dir": temp_dir,
+                "patches": [
+                    {"file": "app/dashboard/page.tsx"},
+                    {"file": "app/dashboard/loading.tsx"},
+                    {"file": "app/dashboard/error.tsx"},
+                    {"file": "components/dashboard/dashboard-shell.tsx"},
+                ],
+                "planning_context": {"design_brief": {"style_keywords": ["editorial"]}},
+            }
+            workspace_profile = {"nextjs": {"router_type": "app"}}
+            command_results = [{"label": "script:visual-review", "exit_code": 0}]
+
+            visual_review = self.agent._build_visual_review(state, workspace_profile, command_results)
+
+            self.assertEqual(visual_review["screenshot_status"], "passed")
+            self.assertEqual(visual_review["responsive_review"]["missing_categories"], ["mobile"])
+            self.assertFalse(visual_review["responsive_review"]["passed"])
 
 
 if __name__ == "__main__":

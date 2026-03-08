@@ -84,6 +84,48 @@ class TestReviewerVisualReview(unittest.TestCase):
             comments,
         )
 
+    def test_visual_review_has_blockers_when_responsive_coverage_is_missing(self) -> None:
+        visual_review = {
+            "enabled": True,
+            "state_coverage": {
+                "loading_file": True,
+                "error_file": True,
+                "loading_state": True,
+                "empty_state": True,
+                "error_state": True,
+                "success_state": True,
+            },
+            "screenshot_status": "passed",
+            "responsive_review": {
+                "missing_categories": ["mobile"],
+                "missing_viewport_metadata": [],
+            },
+        }
+
+        self.assertTrue(self.agent._visual_review_has_blockers(visual_review))
+
+    def test_visual_review_comments_include_missing_responsive_coverage_message(self) -> None:
+        visual_review = {
+            "enabled": True,
+            "state_coverage": {
+                "loading_file": True,
+                "error_file": True,
+                "loading_state": True,
+                "empty_state": True,
+                "error_state": True,
+                "success_state": True,
+            },
+            "screenshot_status": "passed",
+            "responsive_review": {
+                "missing_categories": ["mobile"],
+                "missing_viewport_metadata": [],
+            },
+        }
+
+        comments = self.agent._visual_review_comments(visual_review, analysis_only=False)
+
+        self.assertIn("Frontend visual review is missing responsive viewport coverage for: mobile.", comments)
+
 
 if __name__ == "__main__":
     unittest.main()
