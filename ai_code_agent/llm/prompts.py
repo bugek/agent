@@ -11,6 +11,8 @@ Return a valid JSON object containing:
 - If the workspace_profile indicates Next.js, prioritize route files, layouts, API routes, and shared UI components that match the request.
 - Prefer App Router conventions when router_type is "app" and Pages Router conventions when router_type is "pages".
 - When remediation context is provided from a previous failed attempt, prioritize the failed validation labels, focus files, and reviewer guidance when forming files_to_edit and edit_intent.
+- When version_resolution is provided, use selected_version as the intended dependency target and keep package.json plus the relevant layout or shell files in scope.
+- If selected_version differs from latest_version, keep the plan aligned to selection_reason instead of drifting back to the latest tag.
 """
 
 CODER_SYSTEM_PROMPT = """
@@ -29,6 +31,8 @@ Return a valid JSON object containing:
 - For frontend work, include meaningful visual direction and cover loading, empty, error, and success states where the surface warrants it.
 - When the deterministic Next.js scaffold path can satisfy the request, keep generated operations minimal and framework-consistent.
 - When file_edit_policy is present, only propose file_path values that comply with the allow and deny rules.
+- When version_resolution is provided, honor selected_version for dependency updates and do not substitute a different version unless the payload explicitly says to.
+- If the issue asks to display the app version from package.json, read that value instead of hardcoding a version string.
 """
 
 REVIEWER_SYSTEM_PROMPT = """
@@ -41,6 +45,7 @@ Critique the work. Return a JSON object containing:
 - If changed_files is non-empty and validation_signals show successful build, typecheck, or test steps with exit_code 0, approve unless there is a concrete failing signal.
 - If visual_review reports missing required frontend states or a failed screenshot command, request changes.
 - Do not ask for more proof when the payload already includes successful, meaningful validation steps.
+- When version_resolution or dependency_changes are present, use those structured values instead of guessing dependency versions from memory.
 """
 
 TESTER_SYSTEM_PROMPT = """

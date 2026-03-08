@@ -8,6 +8,7 @@ from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import PLANNER_SYSTEM_PROMPT
 from ai_code_agent.tools.code_search import CodeSearch
 from ai_code_agent.tools.edit_policy import filter_edit_paths, summarize_edit_policy
+from ai_code_agent.tools.version_resolution import resolve_workspace_version_context
 from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
 class PlannerAgent(BaseAgent):
@@ -26,6 +27,7 @@ class PlannerAgent(BaseAgent):
         keywords = self._extract_keywords(issue)
         workspace_profile = detect_workspace_profile(state["workspace_dir"])
         design_brief = self._extract_design_brief(issue, workspace_profile)
+        version_resolution = resolve_workspace_version_context(state["workspace_dir"], issue, workspace_profile)
         remediation_context = self._planning_remediation_context(state)
         retrieval_mode = self._normalized_retrieval_mode()
         scored_files = self._rank_candidate_files(search, state["workspace_dir"], workspace_profile, keywords, retrieval_mode)
@@ -56,6 +58,7 @@ class PlannerAgent(BaseAgent):
             "issue": issue,
             "workspace_profile": workspace_profile,
             "design_brief": design_brief,
+            "version_resolution": version_resolution,
             "retry_count": state.get("retry_count", 0),
             "remediation": remediation_context,
             "candidate_files": candidate_files[:10],
@@ -64,6 +67,7 @@ class PlannerAgent(BaseAgent):
         plan = self._normalize_plan(response.get("plan")) or self._fallback_plan(issue, candidate_files)
         files_to_edit = response.get("files_to_edit") or candidate_files[:10]
         files_to_edit = self._expand_nextjs_route_bundle_files(files_to_edit, workspace_profile)
+        files_to_edit = self._prioritize_version_resolution_files(files_to_edit, workspace_profile, version_resolution)
         edit_intent = self._normalize_edit_intent(response.get("edit_intent"), files_to_edit, remediation_context)
         if remediation_context:
             files_to_edit = self._prioritize_remediation_files(files_to_edit, remediation_context)
@@ -83,6 +87,7 @@ class PlannerAgent(BaseAgent):
                 "keywords": keywords[:10],
                 "workspace_profile": workspace_profile,
                 "design_brief": design_brief,
+                "version_resolution": version_resolution,
                 "file_edit_policy": file_edit_policy,
                 "blocked_candidate_files": blocked_candidate_files[:10],
                 "blocked_files_to_edit": blocked_files_to_edit[:10],
@@ -257,6 +262,40 @@ class PlannerAgent(BaseAgent):
                 fallback_intent["reason"] = guidance[0]
             intents.append(fallback_intent)
         return self._expand_nextjs_edit_intent(intents)
+
+    def _prioritize_version_resolution_files(
+        self,
+        files_to_edit: list[str],
+        workspace_profile: dict[str, object],
+        version_resolution: dict[str, object] | None,
+    ) -> list[str]:
+        if not version_resolution:
+            return files_to_edit
+
+        prioritized: list[str] = []
+        seen: set[str] = set()
+
+        def add(file_path: str) -> None:
+            normalized = file_path.replace("\\", "/")
+            if normalized not in seen and (Path(self.config.workspace_dir) / normalized).exists():
+                prioritized.append(normalized)
+                seen.add(normalized)
+
+        add("package.json")
+        if version_resolution.get("requires_version_display"):
+            next_profile = workspace_profile.get("nextjs") if isinstance(workspace_profile.get("nextjs"), dict) else {}
+            router_type = next_profile.get("router_type")
+            if router_type == "app":
+                app_dir = str(next_profile.get("app_dir") or "app")
+                add(f"{app_dir}/layout.tsx")
+            elif router_type == "pages":
+                pages_dir = str(next_profile.get("pages_dir") or "pages")
+                add(f"{pages_dir}/_app.tsx")
+
+        for file_path in files_to_edit:
+            if isinstance(file_path, str):
+                add(file_path)
+        return prioritized[:10]
 
     def _expand_nextjs_edit_intent(self, intents: list[dict[str, object]]) -> list[dict[str, object]]:
         workspace_profile = detect_workspace_profile(self.config.workspace_dir)

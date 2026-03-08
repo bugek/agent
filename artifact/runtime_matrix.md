@@ -7,6 +7,7 @@ This document defines the runtime versions that matter for local development, co
 | Surface | Runtime | Requirement | Why this version | Source of truth |
 | --- | --- | --- | --- | --- |
 | Main repo CLI and validation entrypoints | Python | 3.11 | The repository and CI validation workflow are exercised with Python 3.11, which is the supported baseline for the current package and test suite. | `.github/workflows/validation.yml`, `pyproject.toml` |
+| Sandbox image | Node.js | 22.x | The default Docker sandbox should match the strictest Node runtime used by repository validation so live issue runs do not silently undercut the framework baseline. | `Dockerfile`, `ai_code_agent/config.py` |
 | CI validation workflow | Node.js | 22.x | CI uses one modern Node line that satisfies the strictest fixture requirement, avoids split-brain behavior between fixtures, and stays comfortably above Next 16's minimum runtime. | `.github/workflows/validation.yml` |
 | NestJS smoke fixture | Node.js | >=20 | Nest 11 support targets modern Node releases; using a Node 20+ floor keeps the fixture aligned with the framework's supported runtime family without over-constraining local runs to a single patch line. | `artifact/fixtures/nestjs-smoke/package.json` |
 | Next.js visual-review fixture | Node.js | >=20.9.0 | Next 16 requires Node 20.9.0 or newer. The fixture declares that exact floor because the smoke harness runs real `next dev`, `next build`, and Playwright-driven screenshot capture. | `artifact/fixtures/nextjs-visual-review/package.json`, `artifact/fixtures/nextjs-visual-review/package-lock.json` |
@@ -22,6 +23,7 @@ This document defines the runtime versions that matter for local development, co
 ## Current Interpretation
 
 - If you want one local Node version that matches CI behavior, use Node 22.
+- The default sandbox image should also run Node 22 so workflow validation matches CI and fixture expectations.
 - If you only run the NestJS smoke fixture locally, Node 20+ is sufficient.
 - If you run the Next.js visual-review fixture locally, use Node 20.9+ or newer.
 - If you run the full repository validation suite locally, Node 22 is the safest default because it matches CI and satisfies both fixtures.

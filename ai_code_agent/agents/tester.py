@@ -13,6 +13,7 @@ from ai_code_agent.metrics import list_execution_metrics_artifacts
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.tools.linter import LinterTool
 from ai_code_agent.tools.sandbox import SandboxRunner
+from ai_code_agent.tools.version_resolution import is_dependency_upgrade_request
 from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
 class TesterAgent(BaseAgent):
@@ -160,7 +161,7 @@ class TesterAgent(BaseAgent):
             commands.append(("cli-help", "python -m ai_code_agent.main run --help", 120, None))
 
         if workspace_profile.get("has_package_json"):
-            install_command = self._install_command(workspace_profile)
+            install_command = self._install_command(state, workspace_profile)
             if install_command:
                 commands.append(("package-install", install_command, 900, None))
 
@@ -442,7 +443,7 @@ class TesterAgent(BaseAgent):
             if label in {"script:visual-review", "script:screenshot", "script:test:visual"}
         ]
 
-    def _install_command(self, workspace_profile: dict) -> str | None:
+    def _install_command(self, state: AgentState, workspace_profile: dict) -> str | None:
         if not workspace_profile.get("needs_install"):
             return None
 
@@ -452,6 +453,10 @@ class TesterAgent(BaseAgent):
         if package_manager == "yarn":
             return "yarn install --frozen-lockfile"
         if workspace_profile.get("package_manager") == "npm":
+            planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+            version_resolution = planning_context.get("version_resolution") if isinstance(planning_context.get("version_resolution"), dict) else {}
+            if version_resolution.get("dependency_upgrade_request") or is_dependency_upgrade_request(state.get("issue_description", "")):
+                return "npm install"
             return "npm ci" if "package-lock.json" in workspace_profile.get("lockfiles", []) else "npm install"
         return "npm install"
 

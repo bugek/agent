@@ -106,6 +106,27 @@ class CoderFrontendQualityTest(unittest.TestCase):
         self.assertIn("app/dashboard/loading.tsx", file_paths)
         self.assertIn("app/dashboard/error.tsx", file_paths)
 
+    def test_nextjs_scaffold_is_skipped_for_dependency_upgrade_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            editor = FileEditor(str(root))
+            workspace_profile = {
+                "nextjs": {
+                    "router_type": "app",
+                    "app_dir": "app",
+                    "pages_dir": None,
+                    "component_directories": ["components"],
+                }
+            }
+            state = {
+                "issue_description": "upgrade Next.js and display app version from package.json",
+                "workspace_dir": str(root),
+            }
+
+            operations = self.coder._build_nextjs_operations(state, workspace_profile, editor)
+
+        self.assertEqual(operations, [])
+
     def test_extract_route_slug_ignores_github_issue_url_noise(self) -> None:
         issue = (
             "Issue provider: github\n"

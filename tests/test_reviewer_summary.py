@@ -168,6 +168,41 @@ class ReviewerSummaryTest(unittest.TestCase):
         self.assertEqual(llm.payload["visual_review"]["responsive_review"]["missing_viewport_metadata"], [])
         self.assertEqual(llm.payload["visual_review"]["responsive_review"]["passed"], True)
 
+    def test_reviewer_payload_includes_structured_version_evidence(self) -> None:
+        llm = CapturingReviewLLM()
+        reviewer = ReviewerAgent(AgentConfig(workspace_dir="."), llm)
+
+        reviewer.run(
+            {
+                "issue_description": "upgrade Next.js and display app version from package.json",
+                "workspace_dir": ".",
+                "patches": [
+                    {
+                        "file": "package.json",
+                        "diff": "--- package.json\n+++ package.json\n-    \"next\": \"14.2.16\"\n+    \"next\": \"16.1.6\"\n",
+                    }
+                ],
+                "test_passed": True,
+                "test_results": "script:typecheck(exit=0):\n\nscript:build(exit=0):\n",
+                "planning_context": {
+                    "version_resolution": {
+                        "selected_version": "16.1.6",
+                        "latest_version": "16.1.6",
+                        "selection_reason": "prefer_project_baseline",
+                    }
+                },
+                "codegen_summary": {},
+                "visual_review": None,
+            }
+        )
+
+        self.assertIsNotNone(llm.payload)
+        self.assertEqual(llm.payload["version_resolution"]["selected_version"], "16.1.6")
+        self.assertEqual(llm.payload["dependency_changes"]["next"]["before"], "14.2.16")
+        self.assertEqual(llm.payload["dependency_changes"]["next"]["after"], "16.1.6")
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

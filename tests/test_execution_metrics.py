@@ -202,6 +202,7 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["create_pr"]["outcome"], "existing")
         self.assertEqual(metrics["create_pr"]["reason"], "existing_open_pr")
         self.assertEqual(metrics["phases"]["create_pr"]["status"], "existing")
+        self.assertIsNone(metrics["failures"]["error_message"])
 
     def test_build_execution_metrics_does_not_report_smoke_test_failure_when_tests_not_run(self) -> None:
         metrics = build_execution_metrics(

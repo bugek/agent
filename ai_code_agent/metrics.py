@@ -168,7 +168,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
                 "category": primary_category,
                 "subcategory": failure_subcategory,
             },
-            "error_message": _primary_error_message(state, test_signals),
+            "error_message": _primary_error_message(state, test_signals) if has_failure else None,
             "blocking_comment_count": _blocking_comment_count(state.get("review_comments", [])),
         },
         "phases": _phase_metrics(execution_events, started_at, state),
@@ -340,6 +340,7 @@ def normalize_execution_metrics_payload(metrics: dict[str, Any]) -> dict[str, An
             "subcategory": None,
             "categories": [],
             "taxonomy": {"category": None, "subcategory": None},
+            "error_message": None,
         }
 
     if not create_pr:

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_code_agent.agents.planner import PlannerAgent
 from ai_code_agent.config import AgentConfig
@@ -70,6 +71,53 @@ class PlannerRemediationIntentTest(unittest.TestCase):
             self.assertEqual(result["planning_context"]["edit_intent"][0]["file_path"], "app/dashboard/page.tsx")
             self.assertEqual(result["planning_context"]["edit_intent"][0]["validation_targets"], ["script:test"])
             self.assertIn("Inspect the failing dashboard page.", result["plan"])
+
+    def test_planner_includes_version_resolution_for_dependency_upgrade_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "app").mkdir(parents=True)
+            (workspace / "app/layout.tsx").write_text("export default function RootLayout({ children }) { return <html><body>{children}</body></html>; }\n", encoding="utf-8")
+            (workspace / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "version": "0.1.0",
+                        "dependencies": {"next": "14.2.16", "react": "18.3.1", "react-dom": "18.3.1"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            llm = CapturingPlannerLLM()
+            planner = PlannerAgent(AgentConfig(workspace_dir=temp_dir), llm)
+            with patch(
+                "ai_code_agent.agents.planner.resolve_workspace_version_context",
+                return_value={
+                    "dependency_upgrade_request": True,
+                    "package_name": "next",
+                    "current_version": "14.2.16",
+                    "baseline_version": "16.1.6",
+                    "latest_version": "16.1.6",
+                    "selected_version": "16.1.6",
+                    "selection_reason": "prefer_project_baseline",
+                    "requires_version_display": True,
+                    "package_json_version": "0.1.0",
+                    "dist_tags": {"latest": "16.1.6"},
+                },
+            ):
+                result = planner.run(
+                    {
+                        "issue_description": "upgrade Next.js and display app version from package.json",
+                        "workspace_dir": temp_dir,
+                    }
+                )
+
+            self.assertIsNotNone(llm.payload)
+            self.assertEqual(llm.payload["version_resolution"]["selected_version"], "16.1.6")
+            self.assertEqual(result["planning_context"]["version_resolution"]["selection_reason"], "prefer_project_baseline")
+            self.assertEqual(result["files_to_edit"][:2], ["package.json", "app/layout.tsx"])
 
 
 if __name__ == "__main__":

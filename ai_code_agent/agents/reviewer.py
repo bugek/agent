@@ -36,6 +36,8 @@ class ReviewerAgent(BaseAgent):
             "patch_count": len(patches),
             "changed_files": changed_files,
             "validation_signals": validation_signals,
+            "version_resolution": self._version_resolution(state),
+            "dependency_changes": self._dependency_changes(patches),
             "visual_review": self._review_payload_visual_review(state.get("visual_review")),
             "codegen_summary": state.get("codegen_summary", {}),
             "analysis_only": analysis_only,
@@ -106,6 +108,40 @@ class ReviewerAgent(BaseAgent):
         if isinstance(raw_comments, list):
             return [comment for comment in raw_comments if isinstance(comment, str) and comment.strip()]
         return []
+
+    def _version_resolution(self, state: AgentState) -> dict[str, object] | None:
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        version_resolution = planning_context.get("version_resolution")
+        return version_resolution if isinstance(version_resolution, dict) else None
+
+    def _dependency_changes(self, patches: list[dict]) -> dict[str, dict[str, str]]:
+        changes: dict[str, dict[str, str]] = {}
+        for patch in patches:
+            if not isinstance(patch, dict) or patch.get("file") != "package.json":
+                continue
+            diff = patch.get("diff") if isinstance(patch.get("diff"), str) else ""
+            removed: dict[str, str] = {}
+            added: dict[str, str] = {}
+            for line in diff.splitlines():
+                if line.startswith("---") or line.startswith("+++"):
+                    continue
+                match = re.search(r'^[+-]\s*"([^"]+)":\s*"([^"]+)"', line)
+                if not match:
+                    continue
+                package_name = match.group(1)
+                version = match.group(2)
+                if package_name not in {"next", "react", "react-dom"}:
+                    continue
+                if line.startswith("-"):
+                    removed[package_name] = version
+                elif line.startswith("+"):
+                    added[package_name] = version
+            for package_name in sorted(set(removed) | set(added)):
+                changes[package_name] = {
+                    "before": removed.get(package_name, ""),
+                    "after": added.get(package_name, ""),
+                }
+        return changes
 
     def _visual_review_comments(self, visual_review: object, analysis_only: bool) -> list[str]:
         if analysis_only or not isinstance(visual_review, dict) or not visual_review.get("enabled"):

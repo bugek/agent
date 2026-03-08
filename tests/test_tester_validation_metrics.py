@@ -314,6 +314,25 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(plan["selected_labels"], ["package-install", "script:typecheck", "script:build", "next:router-detected"])
         self.assertNotIn("next:lint", plan["selected_labels"])
 
+    def test_install_command_uses_npm_install_for_dependency_upgrade_requests(self) -> None:
+        command = self.agent._install_command(
+            {
+                "issue_description": "upgrade Next.js and display app version from package.json",
+                "planning_context": {
+                    "version_resolution": {
+                        "dependency_upgrade_request": True,
+                    }
+                },
+            },
+            {
+                "needs_install": True,
+                "package_manager": "npm",
+                "lockfiles": ["package-lock.json"],
+            },
+        )
+
+        self.assertEqual(command, "npm install")
+
 
 if __name__ == "__main__":
     unittest.main()

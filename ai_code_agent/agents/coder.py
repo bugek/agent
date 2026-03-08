@@ -10,6 +10,7 @@ from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import CODER_SYSTEM_PROMPT
 from ai_code_agent.tools.edit_policy import evaluate_edit_path, filter_edit_paths, summarize_edit_policy
 from ai_code_agent.tools.file_editor import FileEditor
+from ai_code_agent.tools.version_resolution import is_dependency_upgrade_request
 from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
 class CoderAgent(BaseAgent):
@@ -36,7 +37,23 @@ class CoderAgent(BaseAgent):
         editor = FileEditor(state["workspace_dir"])
         workspace_profile = state.get("workspace_profile") or detect_workspace_profile(state["workspace_dir"])
         remediation_context = self._remediation_context(state)
+        version_resolution = self._version_resolution(state)
         if remediation_context is None:
+            dependency_upgrade_operations = self._build_nextjs_dependency_upgrade_operations(
+                state,
+                workspace_profile,
+                editor,
+                version_resolution,
+            )
+            if dependency_upgrade_operations:
+                return self._apply_operations(
+                    editor,
+                    state,
+                    dependency_upgrade_operations,
+                    generated_by="nextjs_dependency_upgrade",
+                    remediation_context=None,
+                )
+
             nextjs_operations = self._build_nextjs_operations(state, workspace_profile, editor)
             if nextjs_operations:
                 return self._apply_operations(
@@ -74,6 +91,7 @@ class CoderAgent(BaseAgent):
             "edit_intent": self._edit_intent(state),
             "workspace_profile": workspace_profile,
             "design_brief": self._frontend_design_brief(state),
+            "version_resolution": version_resolution,
             "file_edit_policy": state.get("file_edit_policy") or summarize_edit_policy(
                 self.config.edit_allow_globs,
                 self.config.edit_deny_globs,
@@ -365,6 +383,8 @@ class CoderAgent(BaseAgent):
         issue = state["issue_description"]
         lower_issue = issue.lower()
         design_brief = self._frontend_design_brief(state)
+        if is_dependency_upgrade_request(issue):
+            return []
         if not re.search(r"\b(next|page|layout|component|api|route|handler|hero|card|form|modal|section|dashboard|screen|view)\b", lower_issue):
             return []
 
@@ -460,6 +480,125 @@ class CoderAgent(BaseAgent):
             seen_paths.add(file_path)
 
         return deduplicated
+
+    def _version_resolution(self, state: AgentState) -> dict[str, Any] | None:
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        version_resolution = planning_context.get("version_resolution")
+        return version_resolution if isinstance(version_resolution, dict) else None
+
+    def _build_nextjs_dependency_upgrade_operations(
+        self,
+        state: AgentState,
+        workspace_profile: dict[str, Any],
+        editor: FileEditor,
+        version_resolution: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        nextjs_profile = workspace_profile.get("nextjs")
+        if not nextjs_profile or not isinstance(version_resolution, dict):
+            return []
+        if not version_resolution.get("dependency_upgrade_request"):
+            return []
+
+        selected_version = version_resolution.get("selected_version")
+        if not isinstance(selected_version, str) or not selected_version:
+            return []
+
+        operations: list[dict[str, Any]] = []
+        if editor.exists("package.json"):
+            package_json_content = editor.view_file("package.json")
+            updated_package_json = self._update_package_dependency_version(package_json_content, "next", selected_version)
+            if updated_package_json != package_json_content:
+                operations.append(self._file_operation(editor, "package.json", updated_package_json, preferred_action="write_file"))
+
+        if version_resolution.get("requires_version_display"):
+            layout_file = self._resolve_next_layout_file(nextjs_profile, "")
+            if isinstance(layout_file, str) and editor.exists(layout_file):
+                layout_content = editor.view_file(layout_file)
+                updated_layout = self._inject_package_version_display(layout_file, layout_content)
+                if updated_layout != layout_content:
+                    operations.append(self._file_operation(editor, layout_file, updated_layout, preferred_action="write_file"))
+
+        return operations
+
+    def _update_package_dependency_version(self, package_json_content: str, package_name: str, version: str) -> str:
+        try:
+            package_data = json.loads(package_json_content)
+        except json.JSONDecodeError:
+            return package_json_content
+
+        dependencies = package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else None
+        dev_dependencies = package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else None
+
+        if dependencies and package_name in dependencies:
+            dependencies[package_name] = version
+        elif dev_dependencies and package_name in dev_dependencies:
+            dev_dependencies[package_name] = version
+        else:
+            if dependencies is None:
+                package_data["dependencies"] = {}
+                dependencies = package_data["dependencies"]
+            dependencies[package_name] = version
+
+        return json.dumps(package_data, indent=2, ensure_ascii=True) + "\n"
+
+    def _inject_package_version_display(self, layout_file: str, content: str) -> str:
+        if "packageJson.version" in content or "v{appVersion}" in content:
+            return content
+
+        relative_import = self._relative_package_json_import(layout_file)
+        import_statement = f"import packageJson from '{relative_import}';"
+        updated = content
+
+        if import_statement not in updated:
+            import_lines = list(re.finditer(r"^import .*?;$", updated, re.M))
+            if import_lines:
+                insert_at = import_lines[-1].end()
+                updated = updated[:insert_at] + f"\n{import_statement}" + updated[insert_at:]
+            else:
+                updated = import_statement + "\n" + updated
+
+        if "const appVersion = packageJson.version;" not in updated:
+            export_match = re.search(r"\nexport default (async )?function ", updated)
+            if export_match:
+                updated = updated[: export_match.start()] + "\nconst appVersion = packageJson.version;\n" + updated[export_match.start() :]
+            else:
+                updated += "\nconst appVersion = packageJson.version;\n"
+
+        if "</body>" not in updated:
+            return updated
+
+        if "<footer" in updated and "</footer>" in updated:
+            return updated.replace(
+                "</footer>",
+                '          <span style={{ marginLeft: "0.5rem" }}>v{appVersion}</span>\n        </footer>',
+                1,
+            )
+
+        footer_block = (
+            "\n        <footer\n"
+            "          style={{\n"
+            "            padding: \"1rem 1.5rem 2rem\",\n"
+            "            textAlign: \"center\",\n"
+            "            color: \"#6b5a4a\",\n"
+            "            fontSize: \"0.95rem\",\n"
+            "          }}\n"
+            "        >\n"
+            "          App version v{appVersion}\n"
+            "        </footer>\n"
+            "      "
+        )
+        return updated.replace("</body>", footer_block + "</body>", 1)
+
+    def _relative_package_json_import(self, layout_file: str) -> str:
+        relative_file = PurePosixPath(layout_file.replace("\\", "/"))
+        package_path = PurePosixPath("package.json")
+        parent = relative_file.parent
+        if str(parent) in {".", ""}:
+            return "./package.json"
+
+        parent_parts = [part for part in parent.parts if part not in {"."}]
+        upward = [".."] * len(parent_parts)
+        return "/".join(upward + [package_path.as_posix()])
 
     def _frontend_design_brief(self, state: AgentState) -> dict[str, Any] | None:
         planning_context = state.get("planning_context") or {}
