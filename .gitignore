@@ -58,3 +58,4 @@ cover/
 # Project specific
 sandbox_workspace/
 .ai-code-agent/runs/
+.ai-code-agent/diagnostics/

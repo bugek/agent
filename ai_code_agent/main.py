@@ -8,6 +8,7 @@ from ai_code_agent.metrics import (
     build_execution_metrics_trend,
     generate_run_id,
     list_execution_metrics_artifacts,
+    load_fresh_diagnostics_summary_artifact,
     load_execution_metrics_artifact,
     persist_diagnostics_summary,
     utc_now_iso,
@@ -92,6 +93,31 @@ def run_diagnostics(
         _print_single_run_diagnostics(metrics, metrics_path)
         return 0
 
+    if output_format in {"text", "rows", "ndjson"}:
+        cached_summary, cached_summary_path = load_fresh_diagnostics_summary_artifact(
+            workspace_dir,
+            recent=recent,
+            status=status,
+            failure_category=failure_category,
+        )
+        if cached_summary is not None and cached_summary_path is not None:
+            if output_format == "text":
+                latest_run_id = cached_summary.get("latest_run_id") if isinstance(cached_summary.get("latest_run_id"), str) else None
+                latest_metrics, latest_path = load_execution_metrics_artifact(workspace_dir, latest_run_id)
+                if latest_metrics is not None and latest_path is not None:
+                    _print_summary_text_output(
+                        latest_metrics=latest_metrics,
+                        latest_path=latest_path,
+                        summary=cached_summary,
+                        summary_path=cached_summary_path,
+                        status=status,
+                        failure_category=failure_category,
+                    )
+                    return 0
+            else:
+                _print_summary_export_output(cached_summary, output_format)
+                return 0
+
     metrics_entries = _filter_metrics_entries(
         list_execution_metrics_artifacts(workspace_dir, limit=max(recent * 5, recent)),
         status=status,
@@ -109,14 +135,15 @@ def run_diagnostics(
 
     latest_metrics, latest_path = metrics_entries[0]
     trend = build_execution_metrics_trend(metrics_entries)
+    summary = build_diagnostics_summary(
+        metrics_entries,
+        trend,
+        recent=recent,
+        filters={"status": status, "failure_category": failure_category},
+    )
     summary_path = persist_diagnostics_summary(
         workspace_dir,
-        build_diagnostics_summary(
-            metrics_entries,
-            trend,
-            recent=recent,
-            filters={"status": status, "failure_category": failure_category},
-        ),
+        summary,
         recent=recent,
         status=status,
         failure_category=failure_category,
@@ -134,6 +161,26 @@ def run_diagnostics(
         )
         return 0
 
+    _print_summary_text_output(
+        latest_metrics=latest_metrics,
+        latest_path=latest_path,
+        summary=summary,
+        summary_path=summary_path,
+        status=status,
+        failure_category=failure_category,
+    )
+    return 0
+
+
+def _print_summary_text_output(
+    *,
+    latest_metrics: dict,
+    latest_path: str,
+    summary: dict,
+    summary_path: str | None,
+    status: str | None,
+    failure_category: str | None,
+) -> None:
     _print_single_run_diagnostics(latest_metrics, latest_path)
     if status or failure_category:
         print(
@@ -149,6 +196,7 @@ def run_diagnostics(
         )
     if summary_path:
         print(f"Diagnostics summary artifact: {summary_path}")
+    trend = summary.get("trend") if isinstance(summary.get("trend"), dict) else {}
     print(f"Recent runs analyzed: {trend['run_count']}")
     print(f"Comparable runs: {trend['comparable_run_count']}")
     print(f"Approved runs: {trend['approved_count']}")
@@ -234,13 +282,41 @@ def run_diagnostics(
                 f"{latest_vs_immediate['primary_failure_category_changed']}"
             )
     print("Recent run list:")
-    for metrics, path in metrics_entries:
-        workflow = metrics.get("workflow") or {}
-        failures = metrics.get("failures") or {}
+    for row in summary.get("rows", []):
+        if not isinstance(row, dict):
+            continue
         print(
-            f"- {metrics.get('run_id')}: status={workflow.get('status')}, duration_ms={workflow.get('duration_ms')}, primary_failure={failures.get('primary_category')}, path={path}"
+            f"- {row.get('run_id')}: status={row.get('status')}, duration_ms={row.get('duration_ms')}, primary_failure={row.get('primary_failure')}, path={row.get('path')}"
         )
-    return 0
+
+
+def _print_summary_export_output(summary: dict, output_format: str) -> None:
+    rows = summary.get("rows") if isinstance(summary.get("rows"), list) else []
+    if output_format == "ndjson":
+        for row in rows:
+            print(json.dumps(row, ensure_ascii=True))
+        return
+    if output_format == "rows":
+        print("run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            print(
+                "\t".join(
+                    str(row.get(key, ""))
+                    for key in [
+                        "run_id",
+                        "status",
+                        "primary_failure",
+                        "duration_ms",
+                        "testing_duration_ms",
+                        "terminal_node",
+                        "path",
+                    ]
+                )
+            )
+        return
+    raise ValueError(f"Unsupported summary export format: {output_format}")
 
 
 def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:

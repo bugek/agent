@@ -177,6 +177,40 @@ def persist_diagnostics_summary(
     return _relative_workspace_path(workspace_dir, summary_path)
 
 
+def load_fresh_diagnostics_summary_artifact(
+    workspace_dir: str | None,
+    *,
+    recent: int,
+    status: str | None,
+    failure_category: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not workspace_dir:
+        return None, None
+
+    summary_path = Path(workspace_dir) / DIAGNOSTICS_ROOT / _diagnostics_summary_name(recent, status, failure_category)
+    summary = _load_metrics_file(summary_path)
+    if summary is None:
+        return None, None
+
+    try:
+        summary_mtime = summary_path.stat().st_mtime
+    except OSError:
+        return None, None
+
+    runs_root = Path(workspace_dir) / EXECUTION_RUNS_ROOT
+    latest_metrics_mtime = 0.0
+    if runs_root.exists():
+        for metrics_path in runs_root.glob(f"*/{EXECUTION_METRICS_FILE}"):
+            try:
+                latest_metrics_mtime = max(latest_metrics_mtime, metrics_path.stat().st_mtime)
+            except OSError:
+                continue
+
+    if latest_metrics_mtime > summary_mtime:
+        return None, None
+    return summary, _relative_workspace_path(workspace_dir, summary_path)
+
+
 def load_execution_metrics_artifact(
     workspace_dir: str | None,
     run_id: str | None = None,

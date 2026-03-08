@@ -6,10 +6,11 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from ai_code_agent.config import AgentConfig
 from ai_code_agent.main import parse_args, run_diagnostics
-from ai_code_agent.metrics import persist_execution_metrics
+from ai_code_agent.metrics import build_diagnostics_summary, persist_diagnostics_summary, persist_execution_metrics
 
 
 class MainCliTest(unittest.TestCase):
@@ -491,6 +492,45 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(first_row["run_id"], "run-2")
             self.assertEqual(first_row["status"], "failed")
             self.assertEqual(second_row["run_id"], "run-1")
+
+    def test_run_diagnostics_reuses_fresh_summary_snapshot_for_rows_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 100, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["compileall"], "total_duration_ms": 70, "slowest_command": None},
+                "review": {"status": "changes_required", "residual_risk_count": 1},
+            }
+            metrics_path = persist_execution_metrics(temp_dir, "run-1", metrics)
+            summary = build_diagnostics_summary(
+                [(metrics, ".ai-code-agent/runs/run-1/metrics.json")],
+                {"run_count": 1},
+                recent=1,
+                filters={"status": "failed", "failure_category": None},
+            )
+            summary_path = persist_diagnostics_summary(
+                temp_dir,
+                summary,
+                recent=1,
+                status="failed",
+                failure_category=None,
+            )
+            assert metrics_path is not None
+            assert summary_path is not None
+            os.utime(os.path.join(temp_dir, metrics_path), (100, 100))
+            os.utime(os.path.join(temp_dir, summary_path), (200, 200))
+            output = io.StringIO()
+
+            with patch("ai_code_agent.main.build_execution_metrics_trend", side_effect=AssertionError("should reuse summary")):
+                with redirect_stdout(output):
+                    exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 1, "failed", None, "rows")
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue().splitlines()
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
 
 if __name__ == "__main__":

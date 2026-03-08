@@ -10,6 +10,7 @@ from unittest.mock import patch
 from ai_code_agent import orchestrator
 from ai_code_agent.metrics import (
     build_diagnostics_summary,
+    load_fresh_diagnostics_summary_artifact,
     load_execution_metrics_artifact,
     persist_diagnostics_summary,
     persist_execution_metrics,
@@ -115,6 +116,55 @@ class ExecutionMetricsArtifactTest(unittest.TestCase):
             payload = json.loads(artifact_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["schema_version"], "diagnostics-summary/v1")
             self.assertEqual(payload["latest_run_id"], "run-1")
+
+    def test_load_fresh_diagnostics_summary_artifact_requires_summary_newer_than_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "failed", "duration_ms": 100, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"total_duration_ms": 70},
+            }
+            metrics_path = persist_execution_metrics(temp_dir, "run-1", metrics)
+            summary = build_diagnostics_summary(
+                [(metrics, ".ai-code-agent/runs/run-1/metrics.json")],
+                {"run_count": 1},
+                recent=5,
+                filters={"status": "failed", "failure_category": None},
+            )
+            summary_path = persist_diagnostics_summary(
+                temp_dir,
+                summary,
+                recent=5,
+                status="failed",
+                failure_category=None,
+            )
+            assert metrics_path is not None
+            assert summary_path is not None
+            os.utime(Path(temp_dir) / metrics_path, (100, 100))
+            os.utime(Path(temp_dir) / summary_path, (200, 200))
+
+            loaded_summary, loaded_path = load_fresh_diagnostics_summary_artifact(
+                temp_dir,
+                recent=5,
+                status="failed",
+                failure_category=None,
+            )
+
+            self.assertEqual(loaded_path, summary_path)
+            self.assertEqual(loaded_summary["latest_run_id"], "run-1")
+
+            os.utime(Path(temp_dir) / metrics_path, (300, 300))
+            stale_summary, stale_path = load_fresh_diagnostics_summary_artifact(
+                temp_dir,
+                recent=5,
+                status="failed",
+                failure_category=None,
+            )
+
+            self.assertIsNone(stale_summary)
+            self.assertIsNone(stale_path)
 
 
 if __name__ == "__main__":
