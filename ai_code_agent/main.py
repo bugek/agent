@@ -3,7 +3,13 @@ import json
 import sys
 from ai_code_agent.config import AgentConfig
 from ai_code_agent.llm.client import LLMClient
-from ai_code_agent.metrics import generate_run_id, load_execution_metrics_artifact, utc_now_iso
+from ai_code_agent.metrics import (
+    build_execution_metrics_trend,
+    generate_run_id,
+    list_execution_metrics_artifacts,
+    load_execution_metrics_artifact,
+    utc_now_iso,
+)
 from ai_code_agent.orchestrator import build_graph, AgentState
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -23,6 +29,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     diagnose_parser = subparsers.add_parser("diagnose", help="Read persisted execution metrics for the latest or requested run")
     diagnose_parser.add_argument("--repo", type=str, required=False, help="Local path to the repository workspace")
     diagnose_parser.add_argument("--run-id", type=str, required=False, help="Specific run id to inspect")
+    diagnose_parser.add_argument("--recent", type=int, default=5, help="Number of recent runs to include when summarizing without --run-id")
     diagnose_parser.add_argument("--json", action="store_true", help="Print the metrics artifact as JSON")
 
     if not arguments or arguments[0].startswith("-"):
@@ -49,18 +56,110 @@ def run_health_check(config: AgentConfig, role: str | None, as_json: bool) -> in
     return 0 if report["ok"] else 1
 
 
-def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, as_json: bool) -> int:
+def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, recent: int, as_json: bool) -> int:
     workspace_dir = repo or config.workspace_dir
-    metrics, metrics_path = load_execution_metrics_artifact(workspace_dir, run_id)
-    if metrics is None or metrics_path is None:
-        target = run_id or "latest run"
-        print(f"No execution metrics artifact found for {target} in {workspace_dir}")
-        return 1
+    if run_id:
+        metrics, metrics_path = load_execution_metrics_artifact(workspace_dir, run_id)
+        if metrics is None or metrics_path is None:
+            print(f"No execution metrics artifact found for {run_id} in {workspace_dir}")
+            return 1
 
-    if as_json:
-        print(json.dumps(metrics, indent=2, ensure_ascii=True))
+        if as_json:
+            print(json.dumps(metrics, indent=2, ensure_ascii=True))
+            return 0
+
+        _print_single_run_diagnostics(metrics, metrics_path)
         return 0
 
+    metrics_entries = list_execution_metrics_artifacts(workspace_dir, limit=recent)
+    if not metrics_entries:
+        print(f"No execution metrics artifact found for latest run in {workspace_dir}")
+        return 1
+
+    latest_metrics, latest_path = metrics_entries[0]
+    trend = build_execution_metrics_trend(metrics_entries)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "latest": latest_metrics,
+                    "latest_path": latest_path,
+                    "recent_runs": [
+                        {"metrics": metrics, "path": path} for metrics, path in metrics_entries
+                    ],
+                    "trend": trend,
+                },
+                indent=2,
+                ensure_ascii=True,
+            )
+        )
+        return 0
+
+    _print_single_run_diagnostics(latest_metrics, latest_path)
+    print(f"Recent runs analyzed: {trend['run_count']}")
+    print(f"Comparable runs: {trend['comparable_run_count']}")
+    print(f"Approved runs: {trend['approved_count']}")
+    print(f"Failed runs: {trend['failed_count']}")
+    print(f"Aborted runs: {trend['aborted_count']}")
+    print(f"Success rate: {trend['success_rate']:.2f}")
+    print(f"Average duration ms: {trend['average_duration_ms']}")
+    print(f"Average testing duration ms: {trend['average_testing_duration_ms']}")
+    if trend["primary_failure_categories"]:
+        print(
+            "Primary failure categories: "
+            + ", ".join(f"{name}={count}" for name, count in trend["primary_failure_categories"].items())
+        )
+    latest_vs_window = trend.get("latest_vs_previous_window_average") or {}
+    if latest_vs_window.get("previous_run_count"):
+        print(f"Previous window runs compared: {latest_vs_window['previous_run_count']}")
+        previous_success_rate = latest_vs_window.get("previous_success_rate")
+        if isinstance(previous_success_rate, float):
+            print(f"Previous window success rate: {previous_success_rate:.2f}")
+        for label, key in [
+            ("Window average duration delta ms", "duration_ms_delta"),
+            ("Window average testing duration delta ms", "testing_duration_ms_delta"),
+            ("Window average attempt count delta", "attempt_count_delta"),
+            ("Window average residual risk delta", "residual_risk_count_delta"),
+        ]:
+            value = latest_vs_window.get(key)
+            if isinstance(value, int):
+                direction = latest_vs_window.get(key.replace("_delta", "_direction"))
+                suffix = f" ({direction})" if isinstance(direction, str) else ""
+                print(f"{label}: {value}{suffix}")
+        if latest_vs_window.get("status_changed") is not None:
+            print(f"Latest status changed vs previous window: {latest_vs_window['status_changed']}")
+    latest_vs_immediate = trend.get("latest_vs_immediately_previous_run") or {}
+    if latest_vs_immediate.get("previous_run_id"):
+        print(f"Immediately previous run: {latest_vs_immediate['previous_run_id']}")
+        for label, key in [
+            ("Immediate duration delta ms", "duration_ms_delta"),
+            ("Immediate testing duration delta ms", "testing_duration_ms_delta"),
+            ("Immediate attempt count delta", "attempt_count_delta"),
+            ("Immediate residual risk delta", "residual_risk_count_delta"),
+        ]:
+            value = latest_vs_immediate.get(key)
+            if isinstance(value, int):
+                direction = latest_vs_immediate.get(key.replace("_delta", "_direction"))
+                suffix = f" ({direction})" if isinstance(direction, str) else ""
+                print(f"{label}: {value}{suffix}")
+        if latest_vs_immediate.get("status_changed") is not None:
+            print(f"Latest status changed vs immediate previous run: {latest_vs_immediate['status_changed']}")
+        if latest_vs_immediate.get("primary_failure_category_changed") is not None:
+            print(
+                "Latest primary failure category changed vs immediate previous run: "
+                f"{latest_vs_immediate['primary_failure_category_changed']}"
+            )
+    print("Recent run list:")
+    for metrics, path in metrics_entries:
+        workflow = metrics.get("workflow") or {}
+        failures = metrics.get("failures") or {}
+        print(
+            f"- {metrics.get('run_id')}: status={workflow.get('status')}, duration_ms={workflow.get('duration_ms')}, primary_failure={failures.get('primary_category')}, path={path}"
+        )
+    return 0
+
+
+def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     workflow = metrics.get("workflow") or {}
     failures = metrics.get("failures") or {}
     testing = metrics.get("testing") or {}
@@ -86,7 +185,6 @@ def run_diagnostics(config: AgentConfig, repo: str | None, run_id: str | None, a
         print(f"Testing duration ms: {total_duration_ms}")
     print(f"Review status: {review.get('status')}")
     print(f"Residual risks: {review.get('residual_risk_count')}")
-    return 0
 
 
 def cli(argv: list[str] | None = None):
@@ -98,7 +196,13 @@ def cli(argv: list[str] | None = None):
     if args.command == "health":
         return run_health_check(config, getattr(args, "role", None), getattr(args, "json", False))
     if args.command == "diagnose":
-        return run_diagnostics(config, getattr(args, "repo", None), getattr(args, "run_id", None), getattr(args, "json", False))
+        return run_diagnostics(
+            config,
+            getattr(args, "repo", None),
+            getattr(args, "run_id", None),
+            getattr(args, "recent", 5),
+            getattr(args, "json", False),
+        )
 
     print(f"Starting AI Agent for issue: {args.issue}")
 

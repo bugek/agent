@@ -159,6 +159,266 @@ def load_execution_metrics_artifact(
     return None, None
 
 
+def list_execution_metrics_artifacts(
+    workspace_dir: str | None,
+    limit: int = 5,
+) -> list[tuple[dict[str, Any], str]]:
+    if not workspace_dir:
+        return []
+
+    runs_root = Path(workspace_dir) / EXECUTION_RUNS_ROOT
+    if not runs_root.exists():
+        return []
+
+    resolved_limit = max(1, limit)
+    results: list[tuple[dict[str, Any], str]] = []
+    candidates = sorted(
+        runs_root.glob(f"*/{EXECUTION_METRICS_FILE}"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for metrics_path in candidates:
+        metrics = _load_metrics_file(metrics_path)
+        if metrics is None:
+            continue
+        results.append((metrics, _relative_workspace_path(workspace_dir, metrics_path)))
+        if len(results) >= resolved_limit:
+            break
+    return results
+
+
+def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], str]]) -> dict[str, Any]:
+    if not metrics_entries:
+        return {
+            "run_count": 0,
+            "comparable_run_count": 0,
+            "approved_count": 0,
+            "failed_count": 0,
+            "aborted_count": 0,
+            "success_rate": 0.0,
+            "average_duration_ms": 0,
+            "average_testing_duration_ms": 0,
+            "primary_failure_categories": {},
+            "latest_vs_previous_window_average": {
+                "current_run_id": None,
+                "previous_run_count": 0,
+                "previous_success_rate": None,
+                "duration_ms_delta": None,
+                "duration_ms_direction": None,
+                "testing_duration_ms_delta": None,
+                "testing_duration_ms_direction": None,
+                "attempt_count_delta": None,
+                "attempt_count_direction": None,
+                "residual_risk_count_delta": None,
+                "residual_risk_count_direction": None,
+                "status_changed": None,
+            },
+            "latest_vs_immediately_previous_run": {
+                "current_run_id": None,
+                "previous_run_id": None,
+                "duration_ms_delta": None,
+                "duration_ms_direction": None,
+                "testing_duration_ms_delta": None,
+                "testing_duration_ms_direction": None,
+                "attempt_count_delta": None,
+                "attempt_count_direction": None,
+                "residual_risk_count_delta": None,
+                "residual_risk_count_direction": None,
+                "status_changed": None,
+                "primary_failure_category_changed": None,
+            },
+        }
+
+    approved_count = 0
+    comparable_run_count = 0
+    aborted_count = 0
+    total_duration_ms = 0
+    total_testing_duration_ms = 0
+    failure_categories: dict[str, int] = {}
+    for metrics, _ in metrics_entries:
+        workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+        testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+        failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+        status = workflow.get("status")
+
+        if status == "aborted":
+            aborted_count += 1
+        else:
+            comparable_run_count += 1
+        if status == "approved":
+            approved_count += 1
+        if status != "aborted":
+            total_duration_ms += _as_int(workflow.get("duration_ms"))
+            total_testing_duration_ms += _as_int(testing.get("total_duration_ms"))
+        primary_category = failures.get("primary_category")
+        if isinstance(primary_category, str) and primary_category:
+            failure_categories[primary_category] = failure_categories.get(primary_category, 0) + 1
+
+    run_count = len(metrics_entries)
+    failed_count = max(0, comparable_run_count - approved_count)
+    latest_metrics = metrics_entries[0][0]
+    latest_workflow = latest_metrics.get("workflow") if isinstance(latest_metrics.get("workflow"), dict) else {}
+    latest_testing = latest_metrics.get("testing") if isinstance(latest_metrics.get("testing"), dict) else {}
+    latest_review = latest_metrics.get("review") if isinstance(latest_metrics.get("review"), dict) else {}
+
+    previous_entries = metrics_entries[1:]
+    previous_comparable_entries: list[tuple[dict[str, Any], str]] = []
+    for metrics, path in previous_entries:
+        workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+        if workflow.get("status") == "aborted":
+            continue
+        previous_comparable_entries.append((metrics, path))
+
+    previous_count = len(previous_comparable_entries)
+    previous_approved = 0
+    previous_total_duration_ms = 0
+    previous_total_testing_duration_ms = 0
+    previous_total_attempt_count = 0
+    previous_total_residual_risk_count = 0
+    previous_statuses: set[str] = set()
+    for metrics, _ in previous_comparable_entries:
+        workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+        testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+        review = metrics.get("review") if isinstance(metrics.get("review"), dict) else {}
+        if workflow.get("status") == "approved":
+            previous_approved += 1
+        previous_total_duration_ms += _as_int(workflow.get("duration_ms"))
+        previous_total_testing_duration_ms += _as_int(testing.get("total_duration_ms"))
+        previous_total_attempt_count += _as_int(workflow.get("attempt_count"))
+        previous_total_residual_risk_count += _as_int(review.get("residual_risk_count"))
+        status = workflow.get("status")
+        if isinstance(status, str) and status:
+            previous_statuses.add(status)
+
+    previous_success_rate = previous_approved / previous_count if previous_count else None
+    previous_average_duration_ms = int(previous_total_duration_ms / previous_count) if previous_count else None
+    previous_average_testing_duration_ms = int(previous_total_testing_duration_ms / previous_count) if previous_count else None
+    previous_average_attempt_count = int(previous_total_attempt_count / previous_count) if previous_count else None
+    previous_average_residual_risk_count = int(previous_total_residual_risk_count / previous_count) if previous_count else None
+    immediate_previous_metrics = previous_comparable_entries[0][0] if previous_comparable_entries else None
+    immediate_previous_workflow = (
+        immediate_previous_metrics.get("workflow")
+        if isinstance(immediate_previous_metrics, dict) and isinstance(immediate_previous_metrics.get("workflow"), dict)
+        else {}
+    )
+    immediate_previous_testing = (
+        immediate_previous_metrics.get("testing")
+        if isinstance(immediate_previous_metrics, dict) and isinstance(immediate_previous_metrics.get("testing"), dict)
+        else {}
+    )
+    immediate_previous_review = (
+        immediate_previous_metrics.get("review")
+        if isinstance(immediate_previous_metrics, dict) and isinstance(immediate_previous_metrics.get("review"), dict)
+        else {}
+    )
+    immediate_previous_failures = (
+        immediate_previous_metrics.get("failures")
+        if isinstance(immediate_previous_metrics, dict) and isinstance(immediate_previous_metrics.get("failures"), dict)
+        else {}
+    )
+    window_duration_delta = (
+        _as_int(latest_workflow.get("duration_ms")) - previous_average_duration_ms
+        if previous_average_duration_ms is not None
+        else None
+    )
+    window_testing_duration_delta = (
+        _as_int(latest_testing.get("total_duration_ms")) - previous_average_testing_duration_ms
+        if previous_average_testing_duration_ms is not None
+        else None
+    )
+    window_attempt_count_delta = (
+        _as_int(latest_workflow.get("attempt_count")) - previous_average_attempt_count
+        if previous_average_attempt_count is not None
+        else None
+    )
+    window_residual_risk_delta = (
+        _as_int(latest_review.get("residual_risk_count")) - previous_average_residual_risk_count
+        if previous_average_residual_risk_count is not None
+        else None
+    )
+    immediate_duration_delta = (
+        _as_int(latest_workflow.get("duration_ms")) - _as_int(immediate_previous_workflow.get("duration_ms"))
+        if immediate_previous_metrics is not None
+        else None
+    )
+    immediate_testing_duration_delta = (
+        _as_int(latest_testing.get("total_duration_ms")) - _as_int(immediate_previous_testing.get("total_duration_ms"))
+        if immediate_previous_metrics is not None
+        else None
+    )
+    immediate_attempt_count_delta = (
+        _as_int(latest_workflow.get("attempt_count")) - _as_int(immediate_previous_workflow.get("attempt_count"))
+        if immediate_previous_metrics is not None
+        else None
+    )
+    immediate_residual_risk_delta = (
+        _as_int(latest_review.get("residual_risk_count")) - _as_int(immediate_previous_review.get("residual_risk_count"))
+        if immediate_previous_metrics is not None
+        else None
+    )
+    return {
+        "run_count": run_count,
+        "comparable_run_count": comparable_run_count,
+        "approved_count": approved_count,
+        "failed_count": failed_count,
+        "aborted_count": aborted_count,
+        "success_rate": approved_count / comparable_run_count if comparable_run_count else 0.0,
+        "average_duration_ms": int(total_duration_ms / comparable_run_count) if comparable_run_count else 0,
+        "average_testing_duration_ms": int(total_testing_duration_ms / comparable_run_count) if comparable_run_count else 0,
+        "primary_failure_categories": dict(sorted(failure_categories.items())),
+        "latest_vs_previous_window_average": {
+            "current_run_id": latest_metrics.get("run_id"),
+            "previous_run_count": previous_count,
+            "previous_success_rate": previous_success_rate,
+            "duration_ms_delta": window_duration_delta,
+            "duration_ms_direction": _delta_direction(window_duration_delta, lower_is_better=True),
+            "testing_duration_ms_delta": window_testing_duration_delta,
+            "testing_duration_ms_direction": _delta_direction(window_testing_duration_delta, lower_is_better=True),
+            "attempt_count_delta": window_attempt_count_delta,
+            "attempt_count_direction": _delta_direction(window_attempt_count_delta, lower_is_better=True),
+            "residual_risk_count_delta": window_residual_risk_delta,
+            "residual_risk_count_direction": _delta_direction(window_residual_risk_delta, lower_is_better=True),
+            "status_changed": (
+                latest_workflow.get("status") not in previous_statuses
+                if previous_statuses
+                else None
+            ),
+        },
+        "latest_vs_immediately_previous_run": {
+            "current_run_id": latest_metrics.get("run_id"),
+            "previous_run_id": immediate_previous_metrics.get("run_id") if isinstance(immediate_previous_metrics, dict) else None,
+            "duration_ms_delta": immediate_duration_delta,
+            "duration_ms_direction": _delta_direction(immediate_duration_delta, lower_is_better=True),
+            "testing_duration_ms_delta": immediate_testing_duration_delta,
+            "testing_duration_ms_direction": _delta_direction(immediate_testing_duration_delta, lower_is_better=True),
+            "attempt_count_delta": immediate_attempt_count_delta,
+            "attempt_count_direction": _delta_direction(immediate_attempt_count_delta, lower_is_better=True),
+            "residual_risk_count_delta": immediate_residual_risk_delta,
+            "residual_risk_count_direction": _delta_direction(immediate_residual_risk_delta, lower_is_better=True),
+            "status_changed": (
+                latest_workflow.get("status") != immediate_previous_workflow.get("status")
+                if immediate_previous_metrics is not None
+                else None
+            ),
+            "primary_failure_category_changed": (
+                (latest_metrics.get("failures") or {}).get("primary_category") != immediate_previous_failures.get("primary_category")
+                if immediate_previous_metrics is not None
+                else None
+            ),
+        },
+    }
+
+
+def _delta_direction(delta: int | None, *, lower_is_better: bool) -> str | None:
+    if delta is None:
+        return None
+    if delta == 0:
+        return "flat"
+    if lower_is_better:
+        return "improved" if delta < 0 else "regressed"
+    return "improved" if delta > 0 else "regressed"
+
+
 def _phase_metrics(execution_events: list[dict[str, Any]], started_at: str, state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     phase_metrics: dict[str, dict[str, Any]] = {
         phase: {"status": "not_run", "attempts": 0, "started_at": None, "completed_at": None, "duration_ms": 0}

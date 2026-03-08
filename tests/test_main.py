@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -13,11 +14,12 @@ from ai_code_agent.metrics import persist_execution_metrics
 
 class MainCliTest(unittest.TestCase):
     def test_parse_args_supports_diagnose_command(self) -> None:
-        args = parse_args(["diagnose", "--repo", "workspace", "--run-id", "run-123", "--json"])
+        args = parse_args(["diagnose", "--repo", "workspace", "--run-id", "run-123", "--recent", "7", "--json"])
 
         self.assertEqual(args.command, "diagnose")
         self.assertEqual(args.repo, "workspace")
         self.assertEqual(args.run_id, "run-123")
+        self.assertEqual(args.recent, 7)
         self.assertTrue(args.json)
 
     def test_run_diagnostics_prints_latest_metrics_summary(self) -> None:
@@ -38,7 +40,7 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, False)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 5, False)
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -56,10 +58,189 @@ class MainCliTest(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), temp_dir, "run-123", True)
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), temp_dir, "run-123", 5, True)
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(json.loads(output.getvalue()), metrics)
+
+    def test_run_diagnostics_prints_recent_run_trend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
+                "failures": {"primary_category": None},
+                "testing": {"failed_commands": [], "total_duration_ms": 40, "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+            }
+            second_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 200, "terminal_node": "review"},
+                "failures": {"primary_category": "generation"},
+                "testing": {"failed_commands": [], "total_duration_ms": 80, "slowest_command": {"label": "script:lint", "duration_ms": 60}},
+                "review": {"status": "approved", "residual_risk_count": 1},
+            }
+            third_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-3",
+                "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 200, "slowest_command": {"label": "script:test", "duration_ms": 150}},
+                "review": {"status": "changes_required", "residual_risk_count": 2},
+            }
+            persist_execution_metrics(temp_dir, "run-1", first_metrics)
+            persist_execution_metrics(temp_dir, "run-2", second_metrics)
+            persist_execution_metrics(temp_dir, "run-3", third_metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-2", "metrics.json"), (200, 200))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-3", "metrics.json"), (300, 300))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, False)
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("Recent runs analyzed: 3", rendered)
+            self.assertIn("Comparable runs: 3", rendered)
+            self.assertIn("Approved runs: 2", rendered)
+            self.assertIn("Failed runs: 1", rendered)
+            self.assertIn("Aborted runs: 0", rendered)
+            self.assertIn("Success rate: 0.67", rendered)
+            self.assertIn("Average duration ms: 200", rendered)
+            self.assertIn("Average testing duration ms: 106", rendered)
+            self.assertIn("Primary failure categories: generation=1, validation=1", rendered)
+            self.assertIn("Previous window runs compared: 2", rendered)
+            self.assertIn("Previous window success rate: 1.00", rendered)
+            self.assertIn("Window average duration delta ms: 150 (regressed)", rendered)
+            self.assertIn("Window average testing duration delta ms: 140 (regressed)", rendered)
+            self.assertIn("Window average attempt count delta: 1 (regressed)", rendered)
+            self.assertIn("Window average residual risk delta: 2 (regressed)", rendered)
+            self.assertIn("Latest status changed vs previous window: True", rendered)
+            self.assertIn("Immediately previous run: run-2", rendered)
+            self.assertIn("Immediate duration delta ms: 100 (regressed)", rendered)
+            self.assertIn("Immediate testing duration delta ms: 120 (regressed)", rendered)
+            self.assertIn("Immediate attempt count delta: 1 (regressed)", rendered)
+            self.assertIn("Immediate residual risk delta: 1 (regressed)", rendered)
+            self.assertIn("Latest status changed vs immediate previous run: True", rendered)
+            self.assertIn("Latest primary failure category changed vs immediate previous run: True", rendered)
+            self.assertIn("Recent run list:", rendered)
+            self.assertIn("run-1: status=approved", rendered)
+            self.assertIn("run-2: status=approved", rendered)
+            self.assertIn("run-3: status=failed", rendered)
+
+    def test_run_diagnostics_json_includes_recent_runs_and_trend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
+                "failures": {"primary_category": None},
+                "testing": {"failed_commands": [], "total_duration_ms": 40, "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+            }
+            second_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 200, "terminal_node": "review"},
+                "failures": {"primary_category": "generation"},
+                "testing": {"failed_commands": [], "total_duration_ms": 80, "slowest_command": {"label": "script:lint", "duration_ms": 60}},
+                "review": {"status": "approved", "residual_risk_count": 1},
+            }
+            third_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-3",
+                "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 200, "slowest_command": {"label": "script:test", "duration_ms": 150}},
+                "review": {"status": "changes_required", "residual_risk_count": 2},
+            }
+            persist_execution_metrics(temp_dir, "run-1", first_metrics)
+            persist_execution_metrics(temp_dir, "run-2", second_metrics)
+            persist_execution_metrics(temp_dir, "run-3", third_metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-2", "metrics.json"), (200, 200))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-3", "metrics.json"), (300, 300))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, True)
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["latest"]["run_id"], "run-3")
+            self.assertEqual(len(payload["recent_runs"]), 3)
+            self.assertEqual(payload["trend"]["run_count"], 3)
+            self.assertEqual(payload["trend"]["comparable_run_count"], 3)
+            self.assertEqual(payload["trend"]["approved_count"], 2)
+            self.assertEqual(payload["trend"]["aborted_count"], 0)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["previous_run_count"], 2)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_delta"], 150)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_direction"], "regressed")
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["testing_duration_ms_delta"], 140)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["testing_duration_ms_direction"], "regressed")
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["status_changed"], True)
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["previous_run_id"], "run-2")
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["duration_ms_delta"], 100)
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["duration_ms_direction"], "regressed")
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["testing_duration_ms_delta"], 120)
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["testing_duration_ms_direction"], "regressed")
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["status_changed"], True)
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["primary_failure_category_changed"], True)
+
+    def test_run_diagnostics_skips_aborted_runs_in_comparison_baselines(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            approved_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
+                "failures": {"primary_category": "generation"},
+                "testing": {"failed_commands": [], "total_duration_ms": 20, "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+            }
+            aborted_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "aborted", "attempt_count": 1, "duration_ms": 500, "terminal_node": "test"},
+                "failures": {"primary_category": "policy"},
+                "testing": {"failed_commands": [], "total_duration_ms": 0, "slowest_command": None},
+                "review": {"status": None, "residual_risk_count": 0},
+            }
+            latest_failed_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-3",
+                "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 200, "slowest_command": {"label": "script:test", "duration_ms": 150}},
+                "review": {"status": "changes_required", "residual_risk_count": 2},
+            }
+            persist_execution_metrics(temp_dir, "run-1", approved_metrics)
+            persist_execution_metrics(temp_dir, "run-2", aborted_metrics)
+            persist_execution_metrics(temp_dir, "run-3", latest_failed_metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-2", "metrics.json"), (200, 200))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-3", "metrics.json"), (300, 300))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 3, True)
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["trend"]["run_count"], 3)
+            self.assertEqual(payload["trend"]["comparable_run_count"], 2)
+            self.assertEqual(payload["trend"]["approved_count"], 1)
+            self.assertEqual(payload["trend"]["failed_count"], 1)
+            self.assertEqual(payload["trend"]["aborted_count"], 1)
+            self.assertEqual(payload["trend"]["success_rate"], 0.5)
+            self.assertEqual(payload["trend"]["average_duration_ms"], 200)
+            self.assertEqual(payload["trend"]["average_testing_duration_ms"], 110)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["previous_run_count"], 1)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_delta"], 200)
+            self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_direction"], "regressed")
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["previous_run_id"], "run-1")
+            self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["duration_ms_direction"], "regressed")
 
 
 if __name__ == "__main__":
