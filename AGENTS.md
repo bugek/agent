@@ -112,6 +112,8 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 
 ## Runtime Support
 
+Runtime version matrix for CI, local validation, and committed fixtures lives in `artifact/runtime_matrix.md`.
+
 - Python repositories are validated with compile and CLI smoke checks.
 - JavaScript and TypeScript repositories are detected from `package.json` and lockfiles.
 - The tester can detect `npm`, `pnpm`, and `yarn` and will run install/build/lint/test scripts when present.
@@ -131,9 +133,10 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 - `artifact/fixtures/nestjs-smoke/`: Committed NestJS sample project used by the smoke harness.
 - `artifact/fixtures/nextjs-visual-review/`: Committed Next.js sample project showing the Playwright screenshot/manifest contract used by frontend visual review.
 - `artifact/run_nextjs_visual_review_smoke.py`: End-to-end visual-review smoke harness that installs the fixture, runs Playwright capture, and asserts manifest plus screenshot artifacts for CI.
+- `artifact/runtime_matrix.md`: Runtime compatibility matrix covering Python, CI Node, and framework fixture minimums plus the reason each version is pinned.
 - `artifact/run_retrieval_eval.py`: Benchmark runner that compares `baseline` and `hybrid` retrieval modes.
 - `artifact/fixtures/retrieval-eval-sample/`: Sample repository for retrieval benchmarking across backend and frontend cases.
-- `ai_code_agent/validation.py`: Single entrypoint that runs compile checks, unit tests, and retrieval evaluation in sequence.
+- `ai_code_agent/validation.py`: Single entrypoint that runs compile checks, unit tests, framework smoke checks, and retrieval evaluation in sequence.
 - `.github/workflows/validation.yml`: GitHub Actions workflow that runs the unified validation suite on `push` and `pull_request`.
 
 Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner behavior. The benchmark reports precision@k, recall@k, reciprocal rank, and NDCG@k.
@@ -148,4 +151,4 @@ Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner beha
 6. Run the CLI without API keys to use fallback mode for planning and smoke-test execution only.
 7. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.
 8. Run `python artifact/run_retrieval_eval.py` to compare baseline and hybrid retrieval quality on the committed fixture.
-9. Run `python -m ai_code_agent.validation` or `poetry run ai-code-agent-validate` to execute the combined developer validation suite.
+9. Run `python -m ai_code_agent.validation` or `poetry run ai-code-agent-validate` to execute the combined developer validation suite, including NestJS and Next.js smoke fixtures.
