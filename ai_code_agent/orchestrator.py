@@ -33,6 +33,7 @@ class AgentState(TypedDict, total=False):
     # Populated by Reviewer
     review_comments: list[str]
     review_approved: bool
+    review_summary: dict[str, Any]
 
     # Internal Orchestrator
     retry_count: int
@@ -43,6 +44,7 @@ class AgentState(TypedDict, total=False):
     planning_context: dict[str, Any]
     codegen_summary: dict[str, Any]
     workspace_profile: dict[str, Any]
+    file_edit_policy: dict[str, Any]
 
 
 def _build_runtime() -> tuple[AgentConfig, LLMClient]:
@@ -78,12 +80,18 @@ def plan_node(state: AgentState) -> dict[str, Any]:
     llm = LLMClient.from_config(config, role="planner")
     agent = PlannerAgent(config, llm)
     result = agent.run(state)
+    planning_context = result.get("planning_context", {})
     result["execution_log"] = _merge_logs(state, "Planner agent completed.")
     result["execution_events"] = _append_event(
         state,
         "plan",
         "completed",
-        {"files_to_edit": len(result.get("files_to_edit", []))},
+        {
+            "files_to_edit": len(result.get("files_to_edit", [])),
+            "retrieval_strategy": planning_context.get("retrieval_strategy"),
+            "blocked_files_to_edit": len(planning_context.get("blocked_files_to_edit", [])),
+            "graph_seed_files": len(planning_context.get("graph_seed_files", [])),
+        },
     )
     return result
 
@@ -106,6 +114,9 @@ def code_node(state: AgentState) -> dict[str, Any]:
         {
             "patches": len(result.get("patches", [])),
             "requested_operations": result.get("codegen_summary", {}).get("requested_operations", 0),
+            "blocked_operations": len(result.get("codegen_summary", {}).get("blocked_operations", [])),
+            "failed_operations": len(result.get("codegen_summary", {}).get("failed_operations", [])),
+            "generated_by": result.get("codegen_summary", {}).get("generated_by"),
         },
     )
     return result
@@ -151,6 +162,8 @@ def review_node(state: AgentState) -> dict[str, Any]:
         {
             "review_approved": result.get("review_approved", False),
             "retry_count": result.get("retry_count", state.get("retry_count", 0)),
+            "review_status": result.get("review_summary", {}).get("status"),
+            "residual_risks": len(result.get("review_summary", {}).get("residual_risks", [])),
         },
     )
     return result

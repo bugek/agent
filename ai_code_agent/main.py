@@ -95,6 +95,34 @@ def cli(argv: list[str] | None = None):
         print(f"Review approved: {final_state.get('review_approved', False)}")
         if final_state.get("execution_events"):
             print(f"Execution events: {len(final_state['execution_events'])}")
+        review_summary = final_state.get("review_summary") or {}
+        if review_summary:
+            print("Review summary:")
+            print(f"- Status: {review_summary.get('status', '<unknown>')}")
+            changed_areas = review_summary.get("changed_areas") or []
+            if changed_areas:
+                print(f"- Changed areas: {', '.join(changed_areas)}")
+            validation = review_summary.get("validation") or {}
+            if validation.get("passed"):
+                print(f"- Validation passed: {', '.join(validation['passed'])}")
+            if validation.get("failed"):
+                print(f"- Validation failed: {', '.join(validation['failed'])}")
+            visual_review = review_summary.get("visual_review") or {}
+            if visual_review:
+                print(
+                    f"- Visual review: screenshot_status={visual_review.get('screenshot_status')}, artifact_count={visual_review.get('artifact_count')}"
+                )
+                if visual_review.get("missing_states"):
+                    print(f"- Missing states: {', '.join(visual_review['missing_states'])}")
+                if visual_review.get("missing_responsive_categories"):
+                    print(
+                        f"- Missing responsive coverage: {', '.join(visual_review['missing_responsive_categories'])}"
+                    )
+            residual_risks = review_summary.get("residual_risks") or []
+            if residual_risks:
+                print("- Residual risks:")
+                for risk in residual_risks:
+                    print(f"  - {risk}")
         if final_state.get("review_comments"):
             print("Review comments:")
             for comment in final_state["review_comments"]:

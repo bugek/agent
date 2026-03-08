@@ -7,6 +7,7 @@ from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import PLANNER_SYSTEM_PROMPT
 from ai_code_agent.tools.code_search import CodeSearch
+from ai_code_agent.tools.edit_policy import filter_edit_paths, summarize_edit_policy
 from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
 class PlannerAgent(BaseAgent):
@@ -32,11 +33,22 @@ class PlannerAgent(BaseAgent):
         candidate_files = [file_path for file_path, _ in scored_files[:10]]
         candidate_files = self._expand_related_files(search, candidate_files, keywords, retrieval_mode)
         candidate_files = self._prioritize_profile_files(candidate_files, workspace_profile)
+        candidate_files, blocked_candidate_files = filter_edit_paths(
+            candidate_files,
+            self.config.edit_allow_globs,
+            self.config.edit_deny_globs,
+        )
 
         if not candidate_files:
             candidate_files = [
                 file_path for file_path in search.list_files("ai_code_agent") if file_path.endswith(".py")
             ][:10]
+            candidate_files, blocked_fallback_files = filter_edit_paths(
+                candidate_files,
+                self.config.edit_allow_globs,
+                self.config.edit_deny_globs,
+            )
+            blocked_candidate_files.extend(blocked_fallback_files)
 
         prompt_payload = {
             "issue": issue,
@@ -47,15 +59,25 @@ class PlannerAgent(BaseAgent):
         response = self.llm.generate_json(PLANNER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
         plan = self._normalize_plan(response.get("plan")) or self._fallback_plan(issue, candidate_files)
         files_to_edit = response.get("files_to_edit") or candidate_files[:10]
+        files_to_edit, blocked_files_to_edit = filter_edit_paths(
+            files_to_edit,
+            self.config.edit_allow_globs,
+            self.config.edit_deny_globs,
+        )
+        file_edit_policy = summarize_edit_policy(self.config.edit_allow_globs, self.config.edit_deny_globs)
 
         return {
             "plan": plan,
             "files_to_edit": files_to_edit,
+            "file_edit_policy": file_edit_policy,
             "workspace_profile": workspace_profile,
             "planning_context": {
                 "keywords": keywords[:10],
                 "workspace_profile": workspace_profile,
                 "design_brief": design_brief,
+                "file_edit_policy": file_edit_policy,
+                "blocked_candidate_files": blocked_candidate_files[:10],
+                "blocked_files_to_edit": blocked_files_to_edit[:10],
                 "retrieval_strategy": retrieval_mode,
                 "candidate_explanations_schema_version": 2,
                 "graph_seed_files": graph_seed_files,

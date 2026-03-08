@@ -1,5 +1,6 @@
 import json
 import re
+from pathlib import PurePosixPath
 
 from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
@@ -52,9 +53,20 @@ class ReviewerAgent(BaseAgent):
         if not comments:
             comments.append("Review passed.")
 
+        review_summary = self._build_review_summary(
+            changed_files,
+            validation_signals,
+            state.get("visual_review"),
+            state.get("codegen_summary", {}),
+            comments,
+            review_approved,
+            analysis_only,
+        )
+
         return {
             "review_approved": review_approved,
             "review_comments": comments,
+            "review_summary": review_summary,
         }
 
     def _extract_validation_signals(self, test_results: str) -> list[dict[str, object]]:
@@ -127,3 +139,94 @@ class ReviewerAgent(BaseAgent):
             if responsive_review.get("missing_viewport_metadata"):
                 return True
         return visual_review.get("screenshot_status") in {"failed", "missing_artifacts"}
+
+    def _build_review_summary(
+        self,
+        changed_files: list[str],
+        validation_signals: list[dict[str, object]],
+        visual_review: object,
+        codegen_summary: object,
+        comments: list[str],
+        review_approved: bool,
+        analysis_only: bool,
+    ) -> dict[str, object]:
+        return {
+            "status": "approved" if review_approved else "changes_required",
+            "changed_areas": self._changed_areas(changed_files),
+            "validation": self._validation_summary(validation_signals),
+            "visual_review": self._visual_review_summary(visual_review),
+            "residual_risks": self._residual_risks(codegen_summary, comments, review_approved, analysis_only),
+        }
+
+    def _changed_areas(self, changed_files: list[str]) -> list[str]:
+        areas: list[str] = []
+        seen: set[str] = set()
+        for file_path in changed_files:
+            normalized = PurePosixPath(file_path.replace("\\", "/"))
+            if len(normalized.parts) >= 3:
+                area = "/".join(normalized.parts[:2])
+            elif len(normalized.parts) == 2:
+                area = "/".join(normalized.parts)
+            elif normalized.parts:
+                area = normalized.parts[0]
+            else:
+                continue
+            if area not in seen:
+                seen.add(area)
+                areas.append(area)
+        return areas
+
+    def _validation_summary(self, validation_signals: list[dict[str, object]]) -> dict[str, list[str]]:
+        passed: list[str] = []
+        failed: list[str] = []
+        for signal in validation_signals:
+            label = signal.get("label")
+            exit_code = signal.get("exit_code")
+            if not isinstance(label, str) or not isinstance(exit_code, int):
+                continue
+            if exit_code == 0:
+                passed.append(label)
+            else:
+                failed.append(label)
+        return {"passed": passed, "failed": failed}
+
+    def _visual_review_summary(self, visual_review: object) -> dict[str, object] | None:
+        if not isinstance(visual_review, dict) or not visual_review.get("enabled"):
+            return None
+        state_coverage = visual_review.get("state_coverage") or {}
+        responsive_review = visual_review.get("responsive_review") or {}
+        missing_states = [
+            state_name
+            for state_name, covered in state_coverage.items()
+            if state_name in {"loading_state", "empty_state", "error_state", "success_state"} and not covered
+        ]
+        return {
+            "screenshot_status": visual_review.get("screenshot_status"),
+            "artifact_count": visual_review.get("artifact_count", 0),
+            "missing_states": sorted(missing_states),
+            "responsive_categories": responsive_review.get("categories_present", []),
+            "missing_responsive_categories": responsive_review.get("missing_categories", []),
+        }
+
+    def _residual_risks(
+        self,
+        codegen_summary: object,
+        comments: list[str],
+        review_approved: bool,
+        analysis_only: bool,
+    ) -> list[str]:
+        risks: list[str] = []
+        if isinstance(codegen_summary, dict):
+            blocked_operations = codegen_summary.get("blocked_operations") or []
+            if blocked_operations:
+                risks.append(f"{len(blocked_operations)} operation(s) were blocked by file edit policy.")
+
+        for comment in comments:
+            normalized = comment.strip()
+            if not normalized or normalized == "Review passed.":
+                continue
+            if review_approved and not analysis_only and normalized.startswith("Looks ready for PR"):
+                continue
+            if normalized not in risks:
+                risks.append(normalized)
+        return risks

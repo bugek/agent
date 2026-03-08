@@ -10,6 +10,11 @@ except ImportError:  # pragma: no cover - optional dependency
 if load_dotenv is not None:
     load_dotenv()
 
+
+def _split_globs(value: str | None, default: list[str] | None = None) -> list[str]:
+    raw_value = value if value is not None else ",".join(default or [])
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
 @dataclass
 class AgentConfig:
     """Configuration for the AI Code Agent."""
@@ -43,6 +48,8 @@ class AgentConfig:
     auto_commit: bool = field(default_factory=lambda: os.getenv("AUTO_COMMIT", "false").lower() == "true")
     auto_push: bool = field(default_factory=lambda: os.getenv("AUTO_PUSH", "false").lower() == "true")
     retrieval_mode: str = field(default_factory=lambda: os.getenv("RETRIEVAL_MODE", "hybrid"))
+    edit_allow_globs: list[str] = field(default_factory=lambda: _split_globs(os.getenv("AGENT_EDIT_ALLOW_GLOBS")))
+    edit_deny_globs: list[str] = field(default_factory=lambda: _split_globs(os.getenv("AGENT_EDIT_DENY_GLOBS"), [".git/**"]))
     
     # Internal orchestrator limits
     max_retries: int = int(os.getenv("MAX_RETRIES", "3"))

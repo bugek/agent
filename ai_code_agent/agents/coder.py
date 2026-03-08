@@ -8,6 +8,7 @@ from typing import Any
 from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import CODER_SYSTEM_PROMPT
+from ai_code_agent.tools.edit_policy import evaluate_edit_path, filter_edit_paths, summarize_edit_policy
 from ai_code_agent.tools.file_editor import FileEditor
 from ai_code_agent.tools.workspace_profile import detect_workspace_profile
 
@@ -45,6 +46,11 @@ class CoderAgent(BaseAgent):
         candidate_files = [
             file_path for file_path in state.get("files_to_edit", []) if self._exists(state, file_path)
         ][:5]
+        candidate_files, blocked_context_files = filter_edit_paths(
+            candidate_files,
+            self.config.edit_allow_globs,
+            self.config.edit_deny_globs,
+        )
         file_context = []
         for file_path in candidate_files:
             excerpt = editor.view_file(file_path)
@@ -55,6 +61,10 @@ class CoderAgent(BaseAgent):
             "plan": state.get("plan"),
             "workspace_profile": workspace_profile,
             "design_brief": self._frontend_design_brief(state),
+            "file_edit_policy": state.get("file_edit_policy") or summarize_edit_policy(
+                self.config.edit_allow_globs,
+                self.config.edit_deny_globs,
+            ),
             "files": file_context,
             "schema": {
                 "operations": [
@@ -73,7 +83,10 @@ class CoderAgent(BaseAgent):
             },
         }
         response = self.llm.generate_json(CODER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
-        return self._apply_operations(editor, state, response.get("operations", []), generated_by="llm")
+        result = self._apply_operations(editor, state, response.get("operations", []), generated_by="llm")
+        if blocked_context_files:
+            result.setdefault("codegen_summary", {})["blocked_context_files"] = blocked_context_files
+        return result
 
     def _apply_operations(
         self,
@@ -84,21 +97,49 @@ class CoderAgent(BaseAgent):
     ) -> dict:
         patches: list[dict] = []
         failures: list[str] = []
+        blocked_operations: list[dict[str, str]] = []
 
         for operation in operations:
+            file_path = operation.get("file_path")
+            if isinstance(file_path, str):
+                is_allowed, reason = evaluate_edit_path(
+                    file_path,
+                    self.config.edit_allow_globs,
+                    self.config.edit_deny_globs,
+                )
+                if not is_allowed:
+                    blocked_operations.append(
+                        {
+                            "file_path": file_path.replace("\\", "/"),
+                            "reason": reason or "blocked by file edit policy",
+                        }
+                    )
+                    continue
             patch = self._apply_operation(editor, state, operation)
             if patch is not None:
                 patches.append(patch)
             else:
                 failures.append(self._describe_failed_operation(operation))
 
+        error_message_parts = list(failures)
+        if blocked_operations:
+            blocked_summary = ", ".join(
+                f"{item['file_path']} ({item['reason']})" for item in blocked_operations[:3]
+            )
+            error_message_parts.append(f"file edit policy blocked operations: {blocked_summary}")
+
         return {
             "patches": patches,
-            "error_message": None if not failures else "; ".join(failures),
+            "error_message": None if not error_message_parts else "; ".join(error_message_parts),
             "codegen_summary": {
                 "requested_operations": len(operations),
                 "applied_operations": len(patches),
                 "failed_operations": failures,
+                "blocked_operations": blocked_operations,
+                "file_edit_policy": state.get("file_edit_policy") or summarize_edit_policy(
+                    self.config.edit_allow_globs,
+                    self.config.edit_deny_globs,
+                ),
                 "generated_by": generated_by,
             },
         }

@@ -139,6 +139,13 @@ Exit Criteria:
 
 เป้าหมาย: ใช้งานในทีมได้ดีขึ้น
 
+Current progress:
+1. Started
+2. AgentConfig now supports policy-based file restrictions through allow/deny glob rules, and coder enforcement records blocked operations in `codegen_summary`.
+3. Planner filters denied `files_to_edit` targets before they reach coding, which reduces accidental edits outside the team-approved scope.
+4. Reviewer now emits structured review summaries covering changed areas, validation outcomes, visual-review status, and residual risks.
+5. `execution_events` now retain planner, coder, and reviewer decision metadata so runs can be audited without replaying the whole workflow.
+
 Features:
 1. Approval gates
 2. Policy-based file restrictions

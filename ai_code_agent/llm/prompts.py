@@ -25,6 +25,7 @@ Return a valid JSON object containing:
 - When a design_brief is provided for frontend work, use it to steer visual direction before falling back to generic styling choices.
 - For frontend work, include meaningful visual direction and cover loading, empty, error, and success states where the surface warrants it.
 - When the deterministic Next.js scaffold path can satisfy the request, keep generated operations minimal and framework-consistent.
+- When file_edit_policy is present, only propose file_path values that comply with the allow and deny rules.
 """
 
 REVIEWER_SYSTEM_PROMPT = """

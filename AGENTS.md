@@ -114,6 +114,8 @@ You can also override models per role with `PLANNER_MODEL`, `CODER_MODEL`, `TEST
 
 Runtime version matrix for CI, local validation, and committed fixtures lives in `artifact/runtime_matrix.md`.
 
+File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT_DENY_GLOBS` as comma-separated glob lists. The deny list defaults to `.git/**`; when an allow list is present, coder operations outside that scope are blocked and recorded in `codegen_summary`.
+
 - Python repositories are validated with compile and CLI smoke checks.
 - JavaScript and TypeScript repositories are detected from `package.json` and lockfiles.
 - The tester can detect `npm`, `pnpm`, and `yarn` and will run install/build/lint/test scripts when present.
@@ -139,6 +141,10 @@ Runtime version matrix for CI, local validation, and committed fixtures lives in
 - `ai_code_agent/validation.py`: Single entrypoint that supports `quick` and `full` validation modes. `full` runs compile checks, unit tests, framework smoke checks, and retrieval evaluation; `quick` runs compile plus unit tests only.
 - `.github/workflows/validation.yml`: GitHub Actions workflow that runs the unified validation suite on `push` and `pull_request`.
 
+Reviewer output now includes a structured `review_summary` with changed areas, validation pass/fail labels, visual-review findings, and residual risks so team review can scan results faster.
+
+Execution traces now carry richer audit metadata in `execution_events`, including planner retrieval strategy and blocked targets, coder generation source and blocked operations, and reviewer summary status plus residual-risk counts.
+
 Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner behavior. The benchmark reports precision@k, recall@k, reciprocal rank, and NDCG@k.
 
 ## Getting Started
@@ -152,3 +158,4 @@ Use `RETRIEVAL_MODE=baseline` or `RETRIEVAL_MODE=hybrid` to compare planner beha
 7. Run `poetry run ai-code-agent health --role planner` to verify provider wiring and the effective model for a role.
 8. Run `python artifact/run_retrieval_eval.py` to compare baseline and hybrid retrieval quality on the committed fixture.
 9. Run `python -m ai_code_agent.validation --mode quick` for the fast local loop, or `python -m ai_code_agent.validation --mode full` to execute the full developer validation suite including NestJS and Next.js smoke fixtures. The same modes also work through `poetry run ai-code-agent-validate --mode ...`.
+10. Use `AGENT_EDIT_ALLOW_GLOBS=src/**,docs/**` and/or `AGENT_EDIT_DENY_GLOBS=artifact/fixtures/**,.github/workflows/**` when you need policy-based file restrictions for team-safe editing.
