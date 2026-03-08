@@ -93,7 +93,7 @@ def run_diagnostics(
         _print_single_run_diagnostics(metrics, metrics_path)
         return 0
 
-    if output_format in {"text", "rows", "ndjson"}:
+    if output_format in {"text", "json", "rows", "ndjson"}:
         cached_summary, cached_summary_path = load_fresh_diagnostics_summary_artifact(
             workspace_dir,
             recent=recent,
@@ -112,6 +112,21 @@ def run_diagnostics(
                         summary_path=cached_summary_path,
                         status=status,
                         failure_category=failure_category,
+                    )
+                    return 0
+            elif output_format == "json":
+                metrics_entries = _load_metrics_entries_from_summary(workspace_dir, cached_summary)
+                if metrics_entries:
+                    latest_metrics, latest_path = metrics_entries[0]
+                    _print_export_output(
+                        latest_metrics=latest_metrics,
+                        latest_path=latest_path,
+                        metrics_entries=metrics_entries,
+                        trend=cached_summary.get("trend") if isinstance(cached_summary.get("trend"), dict) else {},
+                        output_format=output_format,
+                        filters={"status": status, "failure_category": failure_category},
+                        summary_path=cached_summary_path,
+                        single_run=False,
                     )
                     return 0
             else:
@@ -317,6 +332,22 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
             )
         return
     raise ValueError(f"Unsupported summary export format: {output_format}")
+
+
+def _load_metrics_entries_from_summary(workspace_dir: str | None, summary: dict) -> list[tuple[dict, str]]:
+    rows = summary.get("rows") if isinstance(summary.get("rows"), list) else []
+    metrics_entries: list[tuple[dict, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return []
+        run_id = row.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return []
+        metrics, path = load_execution_metrics_artifact(workspace_dir, run_id)
+        if metrics is None or path is None:
+            return []
+        metrics_entries.append((metrics, path))
+    return metrics_entries
 
 
 def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:

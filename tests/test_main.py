@@ -532,6 +532,64 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
             self.assertIn("run-1\tfailed\tvalidation\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
+    def test_run_diagnostics_reuses_fresh_summary_snapshot_for_json_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
+                "failures": {"primary_category": None},
+                "testing": {"failed_commands": [], "total_duration_ms": 40, "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+            }
+            second_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 200, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 120, "slowest_command": {"label": "script:test", "duration_ms": 120}},
+                "review": {"status": "changes_required", "residual_risk_count": 2},
+            }
+            path_one = persist_execution_metrics(temp_dir, "run-1", first_metrics)
+            path_two = persist_execution_metrics(temp_dir, "run-2", second_metrics)
+            summary = build_diagnostics_summary(
+                [
+                    (second_metrics, ".ai-code-agent/runs/run-2/metrics.json"),
+                    (first_metrics, ".ai-code-agent/runs/run-1/metrics.json"),
+                ],
+                {"run_count": 2, "approved_count": 1, "failed_count": 1, "aborted_count": 0, "comparable_run_count": 2, "success_rate": 0.5},
+                recent=2,
+                filters={"status": None, "failure_category": None},
+            )
+            summary_path = persist_diagnostics_summary(
+                temp_dir,
+                summary,
+                recent=2,
+                status=None,
+                failure_category=None,
+            )
+            assert path_one is not None
+            assert path_two is not None
+            assert summary_path is not None
+            os.utime(os.path.join(temp_dir, path_one), (100, 100))
+            os.utime(os.path.join(temp_dir, path_two), (200, 200))
+            os.utime(os.path.join(temp_dir, summary_path), (300, 300))
+            output = io.StringIO()
+
+            with patch("ai_code_agent.main.build_execution_metrics_trend", side_effect=AssertionError("should reuse summary")):
+                with redirect_stdout(output):
+                    exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 2, None, None, "json")
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["latest"]["run_id"], "run-2")
+            self.assertEqual(payload["latest_path"], ".ai-code-agent/runs/run-2/metrics.json")
+            self.assertEqual(payload["summary_path"], ".ai-code-agent/diagnostics/diagnose-recent-2.json")
+            self.assertEqual(len(payload["recent_runs"]), 2)
+            self.assertEqual(payload["recent_runs"][0]["metrics"]["run_id"], "run-2")
+            self.assertEqual(payload["recent_runs"][1]["metrics"]["run_id"], "run-1")
+            self.assertEqual(payload["trend"]["run_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
