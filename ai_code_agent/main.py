@@ -220,6 +220,11 @@ def _print_summary_text_output(
     print(f"Success rate: {trend['success_rate']:.2f}")
     print(f"Average duration ms: {trend['average_duration_ms']}")
     print(f"Average testing duration ms: {trend['average_testing_duration_ms']}")
+    if trend.get("validation_strategies"):
+        print(
+            "Validation strategies: "
+            + ", ".join(f"{name}={count}" for name, count in trend["validation_strategies"].items())
+        )
     if trend["primary_failure_categories"]:
         print(
             "Primary failure categories: "
@@ -312,7 +317,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
             print(json.dumps(row, ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -323,6 +328,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
                         "run_id",
                         "status",
                         "primary_failure",
+                        "validation_strategy",
                         "duration_ms",
                         "testing_duration_ms",
                         "terminal_node",
@@ -363,9 +369,17 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     print(f"Terminal node: {workflow.get('terminal_node')}")
     if failures.get("primary_category"):
         print(f"Primary failure category: {failures.get('primary_category')}")
+    if isinstance(testing.get("validation_strategy"), str):
+        print(f"Validation strategy: {testing.get('validation_strategy')}")
     failed_commands = testing.get("failed_commands") or []
     if failed_commands:
         print(f"Failed commands: {', '.join(failed_commands)}")
+    requested_retry_labels = testing.get("requested_retry_labels") or []
+    if requested_retry_labels:
+        print(f"Requested retry labels: {', '.join(requested_retry_labels)}")
+    skipped_command_count = testing.get("skipped_command_count")
+    if isinstance(skipped_command_count, int) and skipped_command_count > 0:
+        print(f"Skipped commands on this pass: {skipped_command_count}")
     slowest_command = testing.get("slowest_command") or {}
     if slowest_command.get("label"):
         print(
@@ -433,7 +447,7 @@ def _print_export_output(
             print(json.dumps(_diagnostics_row(metrics, path), ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tvalidation_strategy\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for metrics, path in metrics_entries:
             row = _diagnostics_row(metrics, path)
             print(
@@ -443,6 +457,7 @@ def _print_export_output(
                         "run_id",
                         "status",
                         "primary_failure",
+                        "validation_strategy",
                         "duration_ms",
                         "testing_duration_ms",
                         "terminal_node",
@@ -462,6 +477,7 @@ def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
+        "validation_strategy": testing.get("validation_strategy") or "full",
         "duration_ms": workflow.get("duration_ms") or 0,
         "testing_duration_ms": testing.get("total_duration_ms") or 0,
         "terminal_node": workflow.get("terminal_node") or "",

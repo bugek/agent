@@ -26,6 +26,7 @@ class PlannerAgent(BaseAgent):
         keywords = self._extract_keywords(issue)
         workspace_profile = detect_workspace_profile(state["workspace_dir"])
         design_brief = self._extract_design_brief(issue, workspace_profile)
+        remediation_context = self._planning_remediation_context(state)
         retrieval_mode = self._normalized_retrieval_mode()
         scored_files = self._rank_candidate_files(search, state["workspace_dir"], workspace_profile, keywords, retrieval_mode)
         graph_seed_files = self._graph_seed_files(search, scored_files, keywords) if retrieval_mode == "hybrid" else []
@@ -33,6 +34,7 @@ class PlannerAgent(BaseAgent):
         candidate_files = [file_path for file_path, _ in scored_files[:10]]
         candidate_files = self._expand_related_files(search, candidate_files, keywords, retrieval_mode)
         candidate_files = self._prioritize_profile_files(candidate_files, workspace_profile)
+        candidate_files = self._prioritize_remediation_files(candidate_files, remediation_context)
         candidate_files, blocked_candidate_files = filter_edit_paths(
             candidate_files,
             self.config.edit_allow_globs,
@@ -54,11 +56,16 @@ class PlannerAgent(BaseAgent):
             "issue": issue,
             "workspace_profile": workspace_profile,
             "design_brief": design_brief,
+            "retry_count": state.get("retry_count", 0),
+            "remediation": remediation_context,
             "candidate_files": candidate_files[:10],
         }
         response = self.llm.generate_json(PLANNER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
         plan = self._normalize_plan(response.get("plan")) or self._fallback_plan(issue, candidate_files)
         files_to_edit = response.get("files_to_edit") or candidate_files[:10]
+        edit_intent = self._normalize_edit_intent(response.get("edit_intent"), files_to_edit, remediation_context)
+        if remediation_context:
+            files_to_edit = self._prioritize_remediation_files(files_to_edit, remediation_context)
         files_to_edit, blocked_files_to_edit = filter_edit_paths(
             files_to_edit,
             self.config.edit_allow_globs,
@@ -81,6 +88,8 @@ class PlannerAgent(BaseAgent):
                 "retrieval_strategy": retrieval_mode,
                 "candidate_explanations_schema_version": 2,
                 "graph_seed_files": graph_seed_files,
+                "remediation": remediation_context,
+                "edit_intent": edit_intent,
                 "candidate_scores": [
                     {"file_path": file_path, "score": score} for file_path, score in scored_files[:10]
                 ],
@@ -147,6 +156,104 @@ class PlannerAgent(BaseAgent):
         if candidate_files:
             steps.insert(1, f"Start with: {', '.join(candidate_files[:5])}")
         return "\n".join(f"- {step}" for step in steps)
+
+    def _planning_remediation_context(self, state: AgentState) -> dict[str, object] | None:
+        if int(state.get("retry_count", 0) or 0) <= 0:
+            return None
+
+        review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
+        remediation = review_summary.get("remediation") if isinstance(review_summary.get("remediation"), dict) else {}
+        if not remediation.get("required"):
+            return None
+
+        context = {
+            "review_status": review_summary.get("status"),
+            "failed_validation_labels": [
+                label for label in remediation.get("failed_validation_labels", []) if isinstance(label, str) and label
+            ],
+            "focus_areas": [
+                file_path for file_path in remediation.get("focus_areas", []) if isinstance(file_path, str) and file_path
+            ],
+            "guidance": [
+                item for item in remediation.get("guidance", []) if isinstance(item, str) and item
+            ],
+            "failed_operations": [
+                item for item in remediation.get("failed_operations", []) if isinstance(item, str) and item
+            ],
+        }
+        if not any(context[key] for key in ["failed_validation_labels", "focus_areas", "guidance", "failed_operations"]):
+            return None
+        return context
+
+    def _prioritize_remediation_files(
+        self,
+        candidate_files: list[str],
+        remediation_context: dict[str, object] | None,
+    ) -> list[str]:
+        if not remediation_context:
+            return candidate_files[:10]
+
+        prioritized: list[str] = []
+        seen: set[str] = set()
+        for file_path in remediation_context.get("focus_areas", []):
+            if isinstance(file_path, str):
+                normalized = file_path.replace("\\", "/")
+                if normalized not in seen:
+                    prioritized.append(normalized)
+                    seen.add(normalized)
+        for file_path in candidate_files:
+            normalized = file_path.replace("\\", "/")
+            if normalized not in seen:
+                prioritized.append(normalized)
+                seen.add(normalized)
+        return prioritized[:10]
+
+    def _normalize_edit_intent(
+        self,
+        raw_edit_intent: object,
+        files_to_edit: list[str],
+        remediation_context: dict[str, object] | None,
+    ) -> list[dict[str, object]]:
+        intents: list[dict[str, object]] = []
+        if isinstance(raw_edit_intent, list):
+            for item in raw_edit_intent:
+                if not isinstance(item, dict):
+                    continue
+                file_path = item.get("file_path")
+                if not isinstance(file_path, str) or not file_path:
+                    continue
+                normalized: dict[str, object] = {"file_path": file_path.replace("\\", "/")}
+                for key in ["intent", "reason"]:
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        normalized[key] = value
+                if isinstance(item.get("validation_targets"), list):
+                    validation_targets = [
+                        label for label in item.get("validation_targets", []) if isinstance(label, str) and label
+                    ]
+                    if validation_targets:
+                        normalized["validation_targets"] = validation_targets
+                intents.append(normalized)
+
+        if intents:
+            return intents[:10]
+
+        fallback_targets = [file_path.replace("\\", "/") for file_path in files_to_edit if isinstance(file_path, str) and file_path]
+        validation_targets = remediation_context.get("failed_validation_labels", []) if remediation_context else []
+        guidance = remediation_context.get("guidance", []) if remediation_context else []
+        for file_path in fallback_targets[:5]:
+            fallback_intent: dict[str, object] = {
+                "file_path": file_path,
+                "intent": "Address follow-up issues from the previous review cycle." if remediation_context else "Implement the requested change safely.",
+            }
+            if validation_targets:
+                fallback_intent["validation_targets"] = [
+                    label for label in validation_targets if isinstance(label, str) and label
+                ][:5]
+            if guidance:
+                fallback_intent["reason"] = guidance[0]
+            intents.append(fallback_intent)
+        return intents
 
     def _extract_design_brief(self, issue: str, workspace_profile: dict) -> dict[str, object] | None:
         lower_issue = issue.lower()

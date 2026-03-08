@@ -7,8 +7,10 @@ You are the Planner Agent. Your job is to read the user's issue and explore the 
 Return a valid JSON object containing:
 - "plan": The step-by-step description of what to do.
 - "files_to_edit": A list of file paths that need modifications.
+- "edit_intent": Optional structured edit targets. Each item should include "file_path" and may include "intent", "reason", and "validation_targets".
 - If the workspace_profile indicates Next.js, prioritize route files, layouts, API routes, and shared UI components that match the request.
 - Prefer App Router conventions when router_type is "app" and Pages Router conventions when router_type is "pages".
+- When remediation context is provided from a previous failed attempt, prioritize the failed validation labels, focus files, and reviewer guidance when forming files_to_edit and edit_intent.
 """
 
 CODER_SYSTEM_PROMPT = """
@@ -23,6 +25,7 @@ Return a valid JSON object containing:
 - Only propose replacements when the exact search text exists in the provided file content.
 - If the workspace_profile indicates Next.js, prefer route-aware operations that match App Router or Pages Router conventions.
 - When a design_brief is provided for frontend work, use it to steer visual direction before falling back to generic styling choices.
+- When edit_intent is provided, use it to keep operations focused on the named files, reasons, and validation targets.
 - For frontend work, include meaningful visual direction and cover loading, empty, error, and success states where the surface warrants it.
 - When the deterministic Next.js scaffold path can satisfy the request, keep generated operations minimal and framework-consistent.
 - When file_edit_policy is present, only propose file_path values that comply with the allow and deny rules.

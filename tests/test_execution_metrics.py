@@ -29,6 +29,7 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "candidate_scores": {"app/page.tsx": 0.9, "components/panel.tsx": 0.8},
                     "graph_seed_files": ["app/page.tsx"],
                     "blocked_files_to_edit": [{"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule"}],
+                    "edit_intent": [{"file_path": "app/page.tsx", "intent": "Fix dashboard render regression."}],
                 },
                 "codegen_summary": {
                     "generated_by": "llm",
@@ -50,6 +51,10 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "lint_issue_count": 1,
                     "total_duration_ms": 1100,
                     "slowest_command": {"label": "script:build", "exit_code": 1, "duration_ms": 980, "mode": "local", "timed_out": False},
+                    "validation_strategy": "targeted_retry",
+                    "selected_command_labels": ["script:build"],
+                    "skipped_command_labels": ["compileall"],
+                    "requested_retry_labels": ["script:build"],
                 },
                 "visual_review": {
                     "enabled": True,
@@ -91,10 +96,15 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["workflow"]["status"], "changes_required")
         self.assertEqual(metrics["workflow"]["attempt_count"], 2)
         self.assertEqual(metrics["planning"]["candidate_file_count"], 2)
+        self.assertEqual(metrics["planning"]["edit_intent_count"], 1)
         self.assertEqual(metrics["coding"]["blocked_operation_count"], 1)
         self.assertEqual(metrics["testing"]["failed_commands"], ["script:build"])
         self.assertEqual(metrics["testing"]["lint_issue_count"], 1)
         self.assertEqual(metrics["testing"]["total_duration_ms"], 1100)
+        self.assertEqual(metrics["testing"]["validation_strategy"], "targeted_retry")
+        self.assertEqual(metrics["testing"]["selected_command_count"], 1)
+        self.assertEqual(metrics["testing"]["skipped_command_count"], 1)
+        self.assertEqual(metrics["testing"]["requested_retry_labels"], ["script:build"])
         self.assertEqual(metrics["testing"]["slowest_command"]["label"], "script:build")
         self.assertEqual(metrics["testing"]["commands"][1]["duration_ms"], 980)
         self.assertEqual(metrics["testing"]["visual_review"]["missing_state_count"], 2)

@@ -49,6 +49,9 @@ class MainCliTest(unittest.TestCase):
                 "testing": {
                     "failed_commands": ["script:build"],
                     "total_duration_ms": 1100,
+                    "validation_strategy": "targeted_retry",
+                    "requested_retry_labels": ["script:build"],
+                    "skipped_command_count": 2,
                     "slowest_command": {"label": "script:build", "duration_ms": 980, "exit_code": 1, "timed_out": False},
                 },
                 "review": {"status": "changes_required", "residual_risk_count": 2},
@@ -64,7 +67,10 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Run ID: run-123", rendered)
             self.assertIn("Metrics artifact: .ai-code-agent/runs/run-123/metrics.json", rendered)
             self.assertIn("Primary failure category: validation", rendered)
+            self.assertIn("Validation strategy: targeted_retry", rendered)
             self.assertIn("Failed commands: script:build", rendered)
+            self.assertIn("Requested retry labels: script:build", rendered)
+            self.assertIn("Skipped commands on this pass: 2", rendered)
             self.assertIn("Slowest command: script:build (980 ms)", rendered)
             self.assertIn("Testing duration ms: 1100", rendered)
 
@@ -90,6 +96,7 @@ class MainCliTest(unittest.TestCase):
                 "testing": {
                     "failed_commands": [],
                     "total_duration_ms": 40,
+                    "validation_strategy": "full",
                     "slowest_command": None,
                     "commands": [{"label": "compileall", "duration_ms": 40}],
                 },
@@ -103,6 +110,7 @@ class MainCliTest(unittest.TestCase):
                 "testing": {
                     "failed_commands": [],
                     "total_duration_ms": 80,
+                    "validation_strategy": "full",
                     "slowest_command": {"label": "script:lint", "duration_ms": 60},
                     "commands": [{"label": "script:lint", "duration_ms": 60}, {"label": "compileall", "duration_ms": 20}],
                 },
@@ -116,6 +124,7 @@ class MainCliTest(unittest.TestCase):
                 "testing": {
                     "failed_commands": ["script:test"],
                     "total_duration_ms": 200,
+                    "validation_strategy": "targeted_retry",
                     "slowest_command": {"label": "script:test", "duration_ms": 150},
                     "commands": [{"label": "script:test", "duration_ms": 150}, {"label": "compileall", "duration_ms": 50}],
                 },
@@ -143,6 +152,7 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Success rate: 0.67", rendered)
             self.assertIn("Average duration ms: 200", rendered)
             self.assertIn("Average testing duration ms: 106", rendered)
+            self.assertIn("Validation strategies: full=2, targeted_retry=1", rendered)
             self.assertIn("Primary failure categories: generation=1, validation=1", rendered)
             self.assertIn("Failure breakdown: generation(runs=1; commands=none; nodes=review=1); validation(runs=1; commands=script:test=1; nodes=test=1)", rendered)
             self.assertIn("Top terminal nodes: review=2, test=1", rendered)
@@ -454,8 +464,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tvalidation_strategy\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\tfull\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_supports_ndjson_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -529,8 +539,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tvalidation_strategy\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\tfull\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_reuses_fresh_summary_snapshot_for_json_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

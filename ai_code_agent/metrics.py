@@ -79,6 +79,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "graph_seed_file_count": _count_items(planning_context.get("graph_seed_files")),
             "blocked_file_count": _count_items(planning_context.get("blocked_files_to_edit")),
             "files_to_edit_count": _count_items(state.get("files_to_edit")),
+            "edit_intent_count": _count_items(planning_context.get("edit_intent")),
         },
         "coding": {
             "generated_by": codegen_summary.get("generated_by"),
@@ -98,6 +99,12 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "total_duration_ms": _as_int(testing_summary.get("total_duration_ms")),
             "slowest_command": _testing_slowest_command(testing_summary),
             "commands": _testing_command_summaries(testing_summary),
+            "validation_strategy": testing_summary.get("validation_strategy") or "full",
+            "selected_command_count": _count_items(testing_summary.get("selected_command_labels")),
+            "skipped_command_count": _count_items(testing_summary.get("skipped_command_labels")),
+            "requested_retry_labels": [
+                label for label in testing_summary.get("requested_retry_labels", []) if isinstance(label, str) and label
+            ] if isinstance(testing_summary.get("requested_retry_labels"), list) else [],
             "visual_review": _visual_review_metrics(visual_review),
         },
         "review": {
@@ -279,6 +286,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "average_duration_ms": 0,
             "average_testing_duration_ms": 0,
             "primary_failure_categories": {},
+            "validation_strategies": {},
             "failure_category_breakdown": {},
             "slowest_commands": [],
             "top_terminal_nodes": [],
@@ -323,6 +331,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     command_stats: dict[str, dict[str, Any]] = {}
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
+    validation_strategy_counts: dict[str, int] = {}
     for metrics, _ in metrics_entries:
         workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
         testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
@@ -357,6 +366,9 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 breakdown_terminal_nodes = failure_category_breakdown[primary_category]["terminal_nodes"]
                 breakdown_terminal_nodes[terminal_node] = breakdown_terminal_nodes.get(terminal_node, 0) + 1
         failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
+        validation_strategy = testing.get("validation_strategy")
+        if isinstance(validation_strategy, str) and validation_strategy:
+            validation_strategy_counts[validation_strategy] = validation_strategy_counts.get(validation_strategy, 0) + 1
         for failed_command in failed_commands:
             if not isinstance(failed_command, str) or not failed_command:
                 continue
@@ -499,6 +511,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "average_duration_ms": int(total_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "average_testing_duration_ms": int(total_testing_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "primary_failure_categories": dict(sorted(failure_categories.items())),
+        "validation_strategies": dict(sorted(validation_strategy_counts.items())),
         "failure_category_breakdown": {
             category: {
                 "run_count": breakdown["run_count"],
@@ -612,6 +625,7 @@ def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, An
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
+        "validation_strategy": testing.get("validation_strategy") or "full",
         "duration_ms": workflow.get("duration_ms") or 0,
         "testing_duration_ms": testing.get("total_duration_ms") or 0,
         "terminal_node": workflow.get("terminal_node") or "",

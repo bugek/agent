@@ -71,6 +71,7 @@ class CoderAgent(BaseAgent):
         prompt_payload = {
             "issue": state["issue_description"],
             "plan": state.get("plan"),
+            "edit_intent": self._edit_intent(state),
             "workspace_profile": workspace_profile,
             "design_brief": self._frontend_design_brief(state),
             "file_edit_policy": state.get("file_edit_policy") or summarize_edit_policy(
@@ -183,6 +184,11 @@ class CoderAgent(BaseAgent):
                 if isinstance(file_path, str) and self._exists(state, file_path):
                     candidates.append(file_path)
 
+        for intent in self._edit_intent(state):
+            file_path = intent.get("file_path") if isinstance(intent, dict) else None
+            if isinstance(file_path, str) and self._exists(state, file_path):
+                candidates.append(file_path)
+
         for patch in state.get("patches", []):
             file_path = patch.get("file") if isinstance(patch, dict) else None
             if isinstance(file_path, str) and self._exists(state, file_path):
@@ -244,6 +250,28 @@ class CoderAgent(BaseAgent):
         ):
             return None
         return context
+
+    def _edit_intent(self, state: AgentState) -> list[dict[str, Any]]:
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        edit_intent = planning_context.get("edit_intent") if isinstance(planning_context.get("edit_intent"), list) else []
+        normalized: list[dict[str, Any]] = []
+        for item in edit_intent:
+            if not isinstance(item, dict):
+                continue
+            file_path = item.get("file_path")
+            if not isinstance(file_path, str) or not file_path:
+                continue
+            normalized_item: dict[str, Any] = {"file_path": file_path}
+            for key in ["intent", "reason"]:
+                value = item.get(key)
+                if isinstance(value, str) and value:
+                    normalized_item[key] = value
+            if isinstance(item.get("validation_targets"), list):
+                normalized_item["validation_targets"] = [
+                    label for label in item.get("validation_targets", []) if isinstance(label, str) and label
+                ]
+            normalized.append(normalized_item)
+        return normalized[:10]
 
     def _exists(self, state: AgentState, file_path: str) -> bool:
         path = Path(state["workspace_dir"]) / file_path
