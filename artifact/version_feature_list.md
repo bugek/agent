@@ -161,6 +161,13 @@ Exit Criteria:
 
 เป้าหมาย: เตรียมขึ้น production workload
 
+Current progress:
+1. Started
+2. Execution metrics schema is now defined in `artifact/execution_metrics_schema.md`, with a run-level aggregate model and a normalized event target layered over existing telemetry.
+3. Workflow runs now persist `.ai-code-agent/runs/<run_id>/metrics.json`, and `ai_code_agent.main diagnose` can inspect the latest or requested run artifact.
+4. `execution_events` now emit `node_started` and `node_completed` records with run id, sequence, attempt, normalized status, and duration metadata.
+5. Tester command execution now records per-command durations, timeout flags, and slowest-command summaries into run-level testing metrics.
+
 Features:
 1. CI integration
 2. Better sandbox backends including remote options

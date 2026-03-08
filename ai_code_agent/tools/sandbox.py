@@ -1,4 +1,5 @@
 import os
+import time
 import shutil
 import subprocess
 
@@ -44,44 +45,60 @@ class SandboxRunner:
         if env:
             runtime_env.update(env)
 
-        if self.mode == "docker":
-            workspace = os.path.abspath(self.workspace)
-            docker_cmd = [
-                "docker",
-                "run",
-                "--rm",
-                "-v",
-                f"{workspace}:/workspace",
-                "-w",
-                "/workspace",
-            ]
-            if env:
-                for key, value in env.items():
-                    docker_cmd.extend(["-e", f"{key}={value}"])
-            docker_cmd.extend([
-                self.image,
-                "sh",
-                "-lc",
-                cmd,
-            ])
-            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout, check=False)
-        else:
-            result = subprocess.run(
-                cmd,
-                cwd=self.workspace,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                env=runtime_env,
-            )
+        started_at = time.perf_counter()
+        timed_out = False
+
+        try:
+            if self.mode == "docker":
+                workspace = os.path.abspath(self.workspace)
+                docker_cmd = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "-v",
+                    f"{workspace}:/workspace",
+                    "-w",
+                    "/workspace",
+                ]
+                if env:
+                    for key, value in env.items():
+                        docker_cmd.extend(["-e", f"{key}={value}"])
+                docker_cmd.extend([
+                    self.image,
+                    "sh",
+                    "-lc",
+                    cmd,
+                ])
+                result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout, check=False)
+            else:
+                result = subprocess.run(
+                    cmd,
+                    cwd=self.workspace,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    env=runtime_env,
+                )
+            stdout = result.stdout
+            stderr = result.stderr
+            exit_code = result.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = exc.stdout or ""
+            stderr = (exc.stderr or "") + f"\nCommand timed out after {timeout} seconds."
+            exit_code = 124
+
+        duration_ms = max(0, int((time.perf_counter() - started_at) * 1000))
 
         return {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
             "mode": self.mode,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
         }
         
     def cleanup(self):

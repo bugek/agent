@@ -22,13 +22,29 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
             "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
         ):
             mock_planner.return_value.run.return_value = planner_result
-            result = orchestrator.plan_node({"issue_description": "update app", "workspace_dir": "."})
+            result = orchestrator.plan_node(
+                {
+                    "issue_description": "update app",
+                    "workspace_dir": ".",
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                }
+            )
 
         event = result["execution_events"][-1]
+        start_event = result["execution_events"][-2]
+        self.assertEqual(start_event["event_type"], "node_started")
+        self.assertEqual(start_event["status"], "started")
+        self.assertEqual(start_event["attempt"], 1)
         self.assertEqual(event["node"], "plan")
+        self.assertEqual(event["run_id"], "run-123")
+        self.assertEqual(event["sequence"], 2)
+        self.assertEqual(event["attempt"], 1)
+        self.assertEqual(event["event_type"], "node_completed")
         self.assertEqual(event["details"]["retrieval_strategy"], "hybrid")
         self.assertEqual(event["details"]["blocked_files_to_edit"], 1)
         self.assertEqual(event["details"]["graph_seed_files"], 2)
+        self.assertEqual(result["execution_metrics"]["planning"]["blocked_file_count"], 1)
 
     def test_code_node_records_codegen_decision_details(self) -> None:
         coder_result = {
@@ -45,14 +61,50 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
             "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
         ):
             mock_coder.return_value.run.return_value = coder_result
-            result = orchestrator.code_node({"issue_description": "update docs", "workspace_dir": "."})
+            result = orchestrator.code_node(
+                {
+                    "issue_description": "update docs",
+                    "workspace_dir": ".",
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                    "execution_events": [
+                        {
+                            "run_id": "run-123",
+                            "sequence": 1,
+                            "timestamp": "2026-03-08T10:22:33Z",
+                            "node": "plan",
+                            "event_type": "node_started",
+                            "attempt": 1,
+                            "status": "started",
+                            "duration_ms": 0,
+                        },
+                        {
+                            "run_id": "run-123",
+                            "sequence": 2,
+                            "timestamp": "2026-03-08T10:22:40Z",
+                            "node": "plan",
+                            "event_type": "node_completed",
+                            "attempt": 1,
+                            "status": "completed",
+                            "duration_ms": 7000,
+                        }
+                    ],
+                }
+            )
 
         event = result["execution_events"][-1]
+        start_event = result["execution_events"][-2]
+        self.assertEqual(start_event["event_type"], "node_started")
+        self.assertEqual(start_event["attempt"], 1)
         self.assertEqual(event["node"], "code")
+        self.assertEqual(event["sequence"], 4)
+        self.assertEqual(event["attempt"], 1)
+        self.assertGreaterEqual(event["duration_ms"], 0)
         self.assertEqual(event["details"]["requested_operations"], 3)
         self.assertEqual(event["details"]["blocked_operations"], 1)
         self.assertEqual(event["details"]["failed_operations"], 1)
         self.assertEqual(event["details"]["generated_by"], "llm")
+        self.assertEqual(result["execution_metrics"]["coding"]["blocked_operation_count"], 1)
 
     def test_review_node_records_summary_status_and_risks(self) -> None:
         review_result = {
@@ -74,13 +126,90 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
                     "workspace_dir": ".",
                     "test_passed": True,
                     "retry_count": 0,
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
                 }
             )
 
         event = result["execution_events"][-1]
+        start_event = result["execution_events"][-2]
+        self.assertEqual(start_event["event_type"], "node_started")
         self.assertEqual(event["node"], "review")
+        self.assertEqual(event["status"], "approved")
         self.assertEqual(event["details"]["review_status"], "approved")
         self.assertEqual(event["details"]["residual_risks"], 1)
+        self.assertEqual(result["execution_metrics"]["review"]["status"], "approved")
+
+    def test_test_node_marks_failed_status_and_second_attempt(self) -> None:
+        tester_result = {
+            "test_passed": False,
+            "test_results": "compileall(exit=1):\nboom\n",
+            "visual_review": None,
+        }
+
+        with patch("ai_code_agent.agents.tester.TesterAgent") as mock_tester, patch(
+            "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
+        ):
+            mock_tester.return_value.run.return_value = tester_result
+            result = orchestrator.test_node(
+                {
+                    "issue_description": "update docs",
+                    "workspace_dir": ".",
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                    "execution_events": [
+                        {
+                            "run_id": "run-123",
+                            "sequence": 1,
+                            "timestamp": "2026-03-08T10:22:33Z",
+                            "node": "plan",
+                            "event_type": "node_started",
+                            "attempt": 1,
+                            "status": "started",
+                            "duration_ms": 0,
+                        },
+                        {
+                            "run_id": "run-123",
+                            "sequence": 2,
+                            "timestamp": "2026-03-08T10:22:40Z",
+                            "node": "plan",
+                            "event_type": "node_completed",
+                            "attempt": 1,
+                            "status": "completed",
+                            "duration_ms": 7000,
+                        },
+                        {
+                            "run_id": "run-123",
+                            "sequence": 3,
+                            "timestamp": "2026-03-08T10:22:45Z",
+                            "node": "test",
+                            "event_type": "node_started",
+                            "attempt": 1,
+                            "status": "started",
+                            "duration_ms": 0,
+                        },
+                        {
+                            "run_id": "run-123",
+                            "sequence": 4,
+                            "timestamp": "2026-03-08T10:23:10Z",
+                            "node": "test",
+                            "event_type": "node_completed",
+                            "attempt": 1,
+                            "status": "failed",
+                            "duration_ms": 30000,
+                        },
+                    ],
+                }
+            )
+
+        event = result["execution_events"][-1]
+        start_event = result["execution_events"][-2]
+        self.assertEqual(start_event["event_type"], "node_started")
+        self.assertEqual(start_event["attempt"], 2)
+        self.assertEqual(event["node"], "test")
+        self.assertEqual(event["status"], "failed")
+        self.assertEqual(event["attempt"], 2)
+        self.assertEqual(result["execution_metrics"]["testing"]["status"], "failed")
 
 
 if __name__ == "__main__":

@@ -53,6 +53,7 @@ class TesterAgent(BaseAgent):
         return {
             "test_passed": test_passed,
             "test_results": "\n\n".join(combined_output).strip(),
+            "testing_summary": self._build_testing_summary(command_results, lint_output),
             "visual_review": self._build_visual_review(state, workspace_profile, command_results),
         }
 
@@ -67,6 +68,41 @@ class TesterAgent(BaseAgent):
                 break
 
         return results
+
+    def _build_testing_summary(self, command_results: list[dict], lint_output: list[str]) -> dict[str, object]:
+        commands: list[dict[str, object]] = []
+        total_duration_ms = 0
+        for result in command_results:
+            duration_ms = result.get("duration_ms") if isinstance(result.get("duration_ms"), int) else 0
+            total_duration_ms += max(0, duration_ms)
+            commands.append(
+                {
+                    "label": result.get("label"),
+                    "exit_code": result.get("exit_code"),
+                    "duration_ms": max(0, duration_ms),
+                    "mode": result.get("mode"),
+                    "timed_out": bool(result.get("timed_out", False)),
+                }
+            )
+
+        failed_commands = [
+            command["label"]
+            for command in commands
+            if isinstance(command.get("label"), str) and isinstance(command.get("exit_code"), int) and command["exit_code"] != 0
+        ]
+        slowest_command = None
+        if commands:
+            slowest_command = max(commands, key=lambda command: command.get("duration_ms") or 0)
+
+        return {
+            "commands": commands,
+            "command_count": len(commands),
+            "failed_command_count": len(failed_commands),
+            "failed_commands": failed_commands,
+            "lint_issue_count": len(lint_output),
+            "total_duration_ms": total_duration_ms,
+            "slowest_command": slowest_command,
+        }
 
     def _build_validation_commands(self, state: AgentState, workspace_profile: dict) -> list[tuple[str, str, int, dict[str, str] | None]]:
         commands: list[tuple[str, str, int, dict[str, str] | None]] = []
