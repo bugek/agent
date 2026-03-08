@@ -85,7 +85,12 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-1",
                 "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
                 "failures": {"primary_category": None},
-                "testing": {"failed_commands": [], "total_duration_ms": 40, "slowest_command": None},
+                "testing": {
+                    "failed_commands": [],
+                    "total_duration_ms": 40,
+                    "slowest_command": None,
+                    "commands": [{"label": "compileall", "duration_ms": 40}],
+                },
                 "review": {"status": "approved", "residual_risk_count": 0},
             }
             second_metrics = {
@@ -93,7 +98,12 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-2",
                 "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 200, "terminal_node": "review"},
                 "failures": {"primary_category": "generation"},
-                "testing": {"failed_commands": [], "total_duration_ms": 80, "slowest_command": {"label": "script:lint", "duration_ms": 60}},
+                "testing": {
+                    "failed_commands": [],
+                    "total_duration_ms": 80,
+                    "slowest_command": {"label": "script:lint", "duration_ms": 60},
+                    "commands": [{"label": "script:lint", "duration_ms": 60}, {"label": "compileall", "duration_ms": 20}],
+                },
                 "review": {"status": "approved", "residual_risk_count": 1},
             }
             third_metrics = {
@@ -101,7 +111,12 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-3",
                 "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
                 "failures": {"primary_category": "validation"},
-                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 200, "slowest_command": {"label": "script:test", "duration_ms": 150}},
+                "testing": {
+                    "failed_commands": ["script:test"],
+                    "total_duration_ms": 200,
+                    "slowest_command": {"label": "script:test", "duration_ms": 150},
+                    "commands": [{"label": "script:test", "duration_ms": 150}, {"label": "compileall", "duration_ms": 50}],
+                },
                 "review": {"status": "changes_required", "residual_risk_count": 2},
             }
             persist_execution_metrics(temp_dir, "run-1", first_metrics)
@@ -126,6 +141,9 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Average duration ms: 200", rendered)
             self.assertIn("Average testing duration ms: 106", rendered)
             self.assertIn("Primary failure categories: generation=1, validation=1", rendered)
+            self.assertIn("Top terminal nodes: review=2, test=1", rendered)
+            self.assertIn("Top failing commands: script:test=1", rendered)
+            self.assertIn("Top slowest commands: script:test avg=150 max=150 count=1, script:lint avg=60 max=60 count=1, compileall avg=36 max=50 count=3", rendered)
             self.assertIn("Previous window runs compared: 2", rendered)
             self.assertIn("Previous window success rate: 1.00", rendered)
             self.assertIn("Window average duration delta ms: 150 (regressed)", rendered)
@@ -152,7 +170,12 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-1",
                 "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "review"},
                 "failures": {"primary_category": None},
-                "testing": {"failed_commands": [], "total_duration_ms": 40, "slowest_command": None},
+                "testing": {
+                    "failed_commands": [],
+                    "total_duration_ms": 40,
+                    "slowest_command": None,
+                    "commands": [{"label": "compileall", "duration_ms": 40}],
+                },
                 "review": {"status": "approved", "residual_risk_count": 0},
             }
             second_metrics = {
@@ -160,7 +183,12 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-2",
                 "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 200, "terminal_node": "review"},
                 "failures": {"primary_category": "generation"},
-                "testing": {"failed_commands": [], "total_duration_ms": 80, "slowest_command": {"label": "script:lint", "duration_ms": 60}},
+                "testing": {
+                    "failed_commands": [],
+                    "total_duration_ms": 80,
+                    "slowest_command": {"label": "script:lint", "duration_ms": 60},
+                    "commands": [{"label": "script:lint", "duration_ms": 60}, {"label": "compileall", "duration_ms": 20}],
+                },
                 "review": {"status": "approved", "residual_risk_count": 1},
             }
             third_metrics = {
@@ -168,7 +196,12 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-3",
                 "workflow": {"status": "failed", "attempt_count": 2, "duration_ms": 300, "terminal_node": "test"},
                 "failures": {"primary_category": "validation"},
-                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 200, "slowest_command": {"label": "script:test", "duration_ms": 150}},
+                "testing": {
+                    "failed_commands": ["script:test"],
+                    "total_duration_ms": 200,
+                    "slowest_command": {"label": "script:test", "duration_ms": 150},
+                    "commands": [{"label": "script:test", "duration_ms": 150}, {"label": "compileall", "duration_ms": 50}],
+                },
                 "review": {"status": "changes_required", "residual_risk_count": 2},
             }
             persist_execution_metrics(temp_dir, "run-1", first_metrics)
@@ -190,6 +223,13 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(payload["trend"]["comparable_run_count"], 3)
             self.assertEqual(payload["trend"]["approved_count"], 2)
             self.assertEqual(payload["trend"]["aborted_count"], 0)
+            self.assertEqual(payload["trend"]["top_terminal_nodes"][0], {"node": "review", "count": 2})
+            self.assertEqual(payload["trend"]["top_terminal_nodes"][1], {"node": "test", "count": 1})
+            self.assertEqual(payload["trend"]["top_failing_commands"][0], {"label": "script:test", "count": 1})
+            self.assertEqual(payload["trend"]["slowest_commands"][0]["label"], "script:test")
+            self.assertEqual(payload["trend"]["slowest_commands"][0]["max_duration_ms"], 150)
+            self.assertEqual(payload["trend"]["slowest_commands"][2]["label"], "compileall")
+            self.assertEqual(payload["trend"]["slowest_commands"][2]["average_duration_ms"], 36)
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["previous_run_count"], 2)
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_delta"], 150)
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_direction"], "regressed")
@@ -251,11 +291,56 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(payload["trend"]["success_rate"], 0.5)
             self.assertEqual(payload["trend"]["average_duration_ms"], 200)
             self.assertEqual(payload["trend"]["average_testing_duration_ms"], 110)
+            self.assertEqual(payload["trend"]["top_terminal_nodes"][0], {"node": "test", "count": 2})
+            self.assertEqual(payload["trend"]["top_failing_commands"][0], {"label": "script:test", "count": 1})
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["previous_run_count"], 1)
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_delta"], 200)
             self.assertEqual(payload["trend"]["latest_vs_previous_window_average"]["duration_ms_direction"], "regressed")
             self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["previous_run_id"], "run-1")
             self.assertEqual(payload["trend"]["latest_vs_immediately_previous_run"]["duration_ms_direction"], "regressed")
+
+    def test_run_diagnostics_aggregates_multiple_failing_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics_one = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-1",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 100, "terminal_node": "test"},
+                "failures": {"primary_category": "validation"},
+                "testing": {
+                    "failed_commands": ["script:test", "compileall"],
+                    "total_duration_ms": 100,
+                    "slowest_command": {"label": "script:test", "duration_ms": 80},
+                    "commands": [{"label": "script:test", "duration_ms": 80}, {"label": "compileall", "duration_ms": 20}],
+                },
+                "review": {"status": "changes_required", "residual_risk_count": 1},
+            }
+            metrics_two = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-2",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 120, "terminal_node": "review"},
+                "failures": {"primary_category": "validation"},
+                "testing": {
+                    "failed_commands": ["script:test"],
+                    "total_duration_ms": 120,
+                    "slowest_command": {"label": "script:test", "duration_ms": 90},
+                    "commands": [{"label": "script:test", "duration_ms": 90}, {"label": "script:lint", "duration_ms": 30}],
+                },
+                "review": {"status": "changes_required", "residual_risk_count": 2},
+            }
+            persist_execution_metrics(temp_dir, "run-1", metrics_one)
+            persist_execution_metrics(temp_dir, "run-2", metrics_two)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-1", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-2", "metrics.json"), (200, 200))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 2, "failed", None, True)
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["trend"]["top_failing_commands"][0], {"label": "script:test", "count": 2})
+            self.assertEqual(payload["trend"]["top_failing_commands"][1], {"label": "compileall", "count": 1})
+            self.assertEqual(payload["trend"]["top_terminal_nodes"][0], {"node": "test", "count": 1})
 
     def test_run_diagnostics_filters_recent_runs_by_status_and_failure_category(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

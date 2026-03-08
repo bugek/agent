@@ -199,6 +199,9 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "average_duration_ms": 0,
             "average_testing_duration_ms": 0,
             "primary_failure_categories": {},
+            "slowest_commands": [],
+            "top_terminal_nodes": [],
+            "top_failing_commands": [],
             "latest_vs_previous_window_average": {
                 "current_run_id": None,
                 "previous_run_count": 0,
@@ -235,11 +238,15 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     total_duration_ms = 0
     total_testing_duration_ms = 0
     failure_categories: dict[str, int] = {}
+    command_stats: dict[str, dict[str, Any]] = {}
+    terminal_node_counts: dict[str, int] = {}
+    failing_command_counts: dict[str, int] = {}
     for metrics, _ in metrics_entries:
         workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
         testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
         failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
         status = workflow.get("status")
+        terminal_node = workflow.get("terminal_node")
 
         if status == "aborted":
             aborted_count += 1
@@ -253,6 +260,35 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         primary_category = failures.get("primary_category")
         if isinstance(primary_category, str) and primary_category:
             failure_categories[primary_category] = failure_categories.get(primary_category, 0) + 1
+        if isinstance(terminal_node, str) and terminal_node:
+            terminal_node_counts[terminal_node] = terminal_node_counts.get(terminal_node, 0) + 1
+        failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
+        for failed_command in failed_commands:
+            if not isinstance(failed_command, str) or not failed_command:
+                continue
+            failing_command_counts[failed_command] = failing_command_counts.get(failed_command, 0) + 1
+        commands = testing.get("commands") if isinstance(testing.get("commands"), list) else []
+        for command in commands:
+            if not isinstance(command, dict):
+                continue
+            label = command.get("label")
+            if not isinstance(label, str) or not label:
+                continue
+            duration_ms = _as_int(command.get("duration_ms"))
+            existing = command_stats.get(label)
+            if existing is None:
+                command_stats[label] = {
+                    "label": label,
+                    "count": 1,
+                    "total_duration_ms": duration_ms,
+                    "average_duration_ms": duration_ms,
+                    "max_duration_ms": duration_ms,
+                }
+                continue
+            existing["count"] += 1
+            existing["total_duration_ms"] += duration_ms
+            existing["average_duration_ms"] = int(existing["total_duration_ms"] / existing["count"])
+            existing["max_duration_ms"] = max(existing["max_duration_ms"], duration_ms)
 
     run_count = len(metrics_entries)
     failed_count = max(0, comparable_run_count - approved_count)
@@ -366,6 +402,27 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "average_duration_ms": int(total_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "average_testing_duration_ms": int(total_testing_duration_ms / comparable_run_count) if comparable_run_count else 0,
         "primary_failure_categories": dict(sorted(failure_categories.items())),
+        "slowest_commands": sorted(
+            command_stats.values(),
+            key=lambda item: (item["max_duration_ms"], item["average_duration_ms"], item["count"]),
+            reverse=True,
+        )[:3],
+        "top_terminal_nodes": [
+            {"node": node, "count": count}
+            for node, count in sorted(
+                terminal_node_counts.items(),
+                key=lambda item: (item[1], item[0]),
+                reverse=True,
+            )[:3]
+        ],
+        "top_failing_commands": [
+            {"label": label, "count": count}
+            for label, count in sorted(
+                failing_command_counts.items(),
+                key=lambda item: (item[1], item[0]),
+                reverse=True,
+            )[:3]
+        ],
         "latest_vs_previous_window_average": {
             "current_run_id": latest_metrics.get("run_id"),
             "previous_run_count": previous_count,

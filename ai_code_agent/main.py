@@ -142,6 +142,24 @@ def run_diagnostics(
             "Primary failure categories: "
             + ", ".join(f"{name}={count}" for name, count in trend["primary_failure_categories"].items())
         )
+    if trend.get("top_terminal_nodes"):
+        print(
+            "Top terminal nodes: "
+            + ", ".join(f"{item['node']}={item['count']}" for item in trend["top_terminal_nodes"])
+        )
+    if trend.get("top_failing_commands"):
+        print(
+            "Top failing commands: "
+            + ", ".join(f"{item['label']}={item['count']}" for item in trend["top_failing_commands"])
+        )
+    if trend.get("slowest_commands"):
+        print(
+            "Top slowest commands: "
+            + ", ".join(
+                f"{command['label']} avg={command['average_duration_ms']} max={command['max_duration_ms']} count={command['count']}"
+                for command in trend["slowest_commands"]
+            )
+        )
     latest_vs_window = trend.get("latest_vs_previous_window_average") or {}
     if latest_vs_window.get("previous_run_count"):
         print(f"Previous window runs compared: {latest_vs_window['previous_run_count']}")
