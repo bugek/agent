@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from ai_code_agent.config import AgentConfig
 from ai_code_agent.integrations.azure_devops_client import AzureDevOpsClient
-from ai_code_agent.integrations.github_client import GitHubClient
+from ai_code_agent.integrations.github_client import GitHubClient, GitHubRequestError
 
 
 def resolve_issue_input(
@@ -166,39 +166,121 @@ def create_remote_pr(
     branch_name: str,
     github_client: GitHubClient | None = None,
     azure_client: AzureDevOpsClient | None = None,
-) -> tuple[str | None, str]:
+) -> dict[str, Any]:
     issue_context = state.get("issue_context") if isinstance(state.get("issue_context"), dict) else {}
     provider = issue_context.get("provider")
     title = build_pr_title(state)
     body = build_pr_body(state, branch_name)
+    result = {
+        "outcome": "skipped",
+        "reason": "provider_not_configured",
+        "provider": provider,
+        "branch_name": branch_name,
+        "base_branch": None,
+        "pr_url": None,
+        "message": f"Committed and pushed changes on branch {branch_name}.",
+        "error": None,
+    }
 
     if provider == "github" and config.github_token:
         repo = issue_context.get("repo") or config.github_repo
         if not repo:
-            return None, "Pushed branch, but skipped GitHub PR creation because no repo was configured."
+            result.update(
+                {
+                    "reason": "missing_repo",
+                    "message": "Pushed branch, but skipped GitHub PR creation because no repo was configured.",
+                }
+            )
+            return result
         client = github_client or GitHubClient(config.github_token)
-        pr_url = client.create_pull_request(str(repo), branch_name, title, body, base_branch=config.github_base_branch)
+        base_branch = config.github_base_branch
+        result["base_branch"] = base_branch
+        existing_pr = client.find_open_pull_request(str(repo), branch_name, base_branch=base_branch)
+        if existing_pr:
+            pr_url = existing_pr.get("html_url") if isinstance(existing_pr.get("html_url"), str) else None
+            result.update(
+                {
+                    "outcome": "existing",
+                    "reason": "existing_open_pr",
+                    "pr_url": pr_url,
+                    "message": f"Pushed branch, and found existing open GitHub PR: {pr_url}" if pr_url else "Pushed branch, and found an existing open GitHub PR.",
+                }
+            )
+            return result
+        try:
+            pr_url = client.create_pull_request(str(repo), branch_name, title, body, base_branch=base_branch)
+        except GitHubRequestError as exc:
+            remote_errors = []
+            if isinstance(exc.payload, dict) and isinstance(exc.payload.get("errors"), list):
+                remote_errors = [
+                    item.get("message")
+                    for item in exc.payload["errors"]
+                    if isinstance(item, dict) and isinstance(item.get("message"), str) and item.get("message")
+                ]
+            result.update(
+                {
+                    "outcome": "failed",
+                    "reason": f"github_http_{exc.status_code}",
+                    "message": f"Pushed branch, but GitHub PR creation failed: {'; '.join(remote_errors) if remote_errors else exc.message}",
+                    "error": {'; '.join(remote_errors) if remote_errors else exc.message},
+                }
+            )
+            return result
         issue_number = issue_context.get("issue_number")
         if pr_url and issue_number:
             client.post_comment(str(repo), int(issue_number), f"AI Code Agent opened PR: {pr_url}")
-        return pr_url or None, f"Committed, pushed, and opened GitHub PR: {pr_url}" if pr_url else "Pushed branch, but GitHub PR creation returned no URL."
+        result.update(
+            {
+                "outcome": "created" if pr_url else "failed",
+                "reason": "opened_github_pr" if pr_url else "github_no_url",
+                "pr_url": pr_url or None,
+                "message": f"Committed, pushed, and opened GitHub PR: {pr_url}" if pr_url else "Pushed branch, but GitHub PR creation returned no URL.",
+            }
+        )
+        return result
 
     if provider == "azure_devops" and config.azure_devops_pat:
         project = issue_context.get("project") or config.azure_devops_project
         repo = issue_context.get("repo") or config.azure_devops_repo
         org_url = issue_context.get("org_url") or config.azure_devops_org_url
         if not project or not repo or not org_url:
-            return None, "Pushed branch, but skipped Azure DevOps PR creation because project, repo, or org URL was missing."
+            result.update(
+                {
+                    "reason": "missing_azure_target",
+                    "message": "Pushed branch, but skipped Azure DevOps PR creation because project, repo, or org URL was missing.",
+                }
+            )
+            return result
         client = azure_client or AzureDevOpsClient(config.azure_devops_pat, str(org_url))
         target_ref = f"refs/heads/{config.azure_devops_target_branch}"
         source_ref = branch_name if branch_name.startswith("refs/heads/") else f"refs/heads/{branch_name}"
-        pr_url = client.create_pull_request(str(project), str(repo), source_ref, target_ref, title, body)
+        result["base_branch"] = config.azure_devops_target_branch
+        try:
+            pr_url = client.create_pull_request(str(project), str(repo), source_ref, target_ref, title, body)
+        except Exception as exc:
+            result.update(
+                {
+                    "outcome": "failed",
+                    "reason": "azure_devops_error",
+                    "message": f"Pushed branch, but Azure DevOps PR creation failed: {exc}",
+                    "error": str(exc),
+                }
+            )
+            return result
         work_item_id = issue_context.get("work_item_id")
         if pr_url and work_item_id:
             client.post_work_item_comment(str(project), int(work_item_id), f"AI Code Agent opened PR: {pr_url}")
-        return pr_url or None, f"Committed, pushed, and opened Azure DevOps PR: {pr_url}" if pr_url else "Pushed branch, but Azure DevOps PR creation returned no URL."
+        result.update(
+            {
+                "outcome": "created" if pr_url else "failed",
+                "reason": "opened_azure_pr" if pr_url else "azure_no_url",
+                "pr_url": pr_url or None,
+                "message": f"Committed, pushed, and opened Azure DevOps PR: {pr_url}" if pr_url else "Pushed branch, but Azure DevOps PR creation returned no URL.",
+            }
+        )
+        return result
 
-    return None, f"Committed and pushed changes on branch {branch_name}."
+    return result
 
 
 def build_pr_title(state: dict[str, Any]) -> str:

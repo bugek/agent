@@ -63,6 +63,7 @@ class PlannerAgent(BaseAgent):
         response = self.llm.generate_json(PLANNER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
         plan = self._normalize_plan(response.get("plan")) or self._fallback_plan(issue, candidate_files)
         files_to_edit = response.get("files_to_edit") or candidate_files[:10]
+        files_to_edit = self._expand_nextjs_route_bundle_files(files_to_edit, workspace_profile)
         edit_intent = self._normalize_edit_intent(response.get("edit_intent"), files_to_edit, remediation_context)
         if remediation_context:
             files_to_edit = self._prioritize_remediation_files(files_to_edit, remediation_context)
@@ -181,6 +182,8 @@ class PlannerAgent(BaseAgent):
                 item for item in remediation.get("failed_operations", []) if isinstance(item, str) and item
             ],
         }
+        workspace_profile = detect_workspace_profile(state["workspace_dir"])
+        context["focus_areas"] = self._expand_nextjs_route_bundle_files(context["focus_areas"], workspace_profile)
         if not any(context[key] for key in ["failed_validation_labels", "focus_areas", "guidance", "failed_operations"]):
             return None
         return context
@@ -236,7 +239,7 @@ class PlannerAgent(BaseAgent):
                 intents.append(normalized)
 
         if intents:
-            return intents[:10]
+            return self._expand_nextjs_edit_intent(intents)[:10]
 
         fallback_targets = [file_path.replace("\\", "/") for file_path in files_to_edit if isinstance(file_path, str) and file_path]
         validation_targets = remediation_context.get("failed_validation_labels", []) if remediation_context else []
@@ -253,7 +256,76 @@ class PlannerAgent(BaseAgent):
             if guidance:
                 fallback_intent["reason"] = guidance[0]
             intents.append(fallback_intent)
-        return intents
+        return self._expand_nextjs_edit_intent(intents)
+
+    def _expand_nextjs_edit_intent(self, intents: list[dict[str, object]]) -> list[dict[str, object]]:
+        workspace_profile = detect_workspace_profile(self.config.workspace_dir)
+        expanded_files = self._expand_nextjs_route_bundle_files(
+            [item.get("file_path", "") for item in intents if isinstance(item.get("file_path"), str)],
+            workspace_profile,
+        )
+        by_file: dict[str, dict[str, object]] = {}
+        for item in intents:
+            file_path = item.get("file_path")
+            if isinstance(file_path, str) and file_path:
+                by_file[file_path.replace("\\", "/")] = dict(item)
+
+        template = intents[0] if intents else {}
+        for file_path in expanded_files:
+            if file_path not in by_file:
+                synthesized: dict[str, object] = {"file_path": file_path}
+                for key in ["intent", "reason", "validation_targets"]:
+                    value = template.get(key)
+                    if value:
+                        synthesized[key] = value
+                by_file[file_path] = synthesized
+
+        ordered: list[dict[str, object]] = []
+        for file_path in expanded_files:
+            item = by_file.get(file_path)
+            if item:
+                ordered.append(item)
+        return ordered
+
+    def _expand_nextjs_route_bundle_files(self, file_paths: list[str], workspace_profile: dict) -> list[str]:
+        nextjs_profile = workspace_profile.get("nextjs") if isinstance(workspace_profile, dict) else None
+        app_dir = "app"
+        if isinstance(nextjs_profile, dict) and nextjs_profile.get("router_type") == "app":
+            app_dir = (nextjs_profile.get("app_dir") or "app").replace("\\", "/")
+        elif not any(
+            isinstance(file_path, str)
+            and file_path.replace("\\", "/").startswith("app/")
+            and Path(file_path.replace("\\", "/")).name in {"page.tsx", "loading.tsx", "error.tsx"}
+            for file_path in file_paths
+        ):
+            return [file_path.replace("\\", "/") for file_path in file_paths if isinstance(file_path, str)]
+
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for file_path in file_paths:
+            if not isinstance(file_path, str) or not file_path:
+                continue
+            normalized = file_path.replace("\\", "/")
+            candidates = [normalized]
+            route_dir = self._next_route_dir_for_file(normalized, app_dir)
+            if route_dir is not None:
+                candidates.extend([f"{route_dir}/page.tsx", f"{route_dir}/loading.tsx", f"{route_dir}/error.tsx"])
+            for candidate in candidates:
+                if candidate not in seen:
+                    expanded.append(candidate)
+                    seen.add(candidate)
+        return expanded
+
+    def _next_route_dir_for_file(self, file_path: str, app_dir: str) -> str | None:
+        normalized = file_path.replace("\\", "/")
+        file_name = Path(normalized).name
+        if normalized in {f"{app_dir}/page.tsx", f"{app_dir}/loading.tsx", f"{app_dir}/error.tsx"}:
+            return app_dir
+        if not normalized.startswith(f"{app_dir}/"):
+            return None
+        if file_name not in {"page.tsx", "loading.tsx", "error.tsx"}:
+            return None
+        return normalized.rsplit("/", 1)[0]
 
     def _extract_design_brief(self, issue: str, workspace_profile: dict) -> dict[str, object] | None:
         lower_issue = issue.lower()

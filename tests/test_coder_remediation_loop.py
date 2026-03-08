@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ai_code_agent.agents.coder import CoderAgent
 from ai_code_agent.config import AgentConfig
+from ai_code_agent.tools.file_editor import FileEditor
 
 
 class CapturingCoderLLM:
@@ -71,7 +72,7 @@ class CoderRemediationLoopTest(unittest.TestCase):
             self.assertEqual(result["codegen_summary"]["generated_by"], "llm")
             self.assertEqual(result["codegen_summary"]["retry_count"], 1)
             self.assertEqual(result["codegen_summary"]["remediation_applied"], True)
-            self.assertEqual(result["codegen_summary"]["remediation_focus_count"], 1)
+            self.assertEqual(result["codegen_summary"]["remediation_focus_count"], 3)
             self.assertEqual(len(result["patches"]), 1)
             self.assertEqual(result["patches"][0]["file"], "app/dashboard/page.tsx")
             self.assertIsNotNone(llm.payload)
@@ -79,7 +80,10 @@ class CoderRemediationLoopTest(unittest.TestCase):
             self.assertEqual(llm.payload["remediation"]["source"], "review_loop")
             self.assertEqual(llm.payload["edit_intent"], [])
             self.assertEqual(llm.payload["remediation"]["failed_validation_labels"], ["script:test"])
-            self.assertEqual(llm.payload["remediation"]["focus_areas"], ["app/dashboard/page.tsx"])
+            self.assertEqual(
+                llm.payload["remediation"]["focus_areas"],
+                ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"],
+            )
             self.assertEqual(llm.payload["files"][0]["file_path"], "app/dashboard/page.tsx")
             self.assertIn("Retry fix", (workspace / "app/dashboard/page.tsx").read_text(encoding="utf-8"))
 
@@ -136,6 +140,64 @@ class CoderRemediationLoopTest(unittest.TestCase):
             self.assertIsNotNone(llm.payload)
             self.assertEqual(llm.payload["edit_intent"][0]["file_path"], "app/dashboard/page.tsx")
             self.assertEqual(llm.payload["edit_intent"][0]["validation_targets"], ["script:test"])
+
+    def test_retry_create_file_can_overwrite_existing_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            target = workspace / "components/dashboard/summary-cards.tsx"
+            target.parent.mkdir(parents=True)
+            target.write_text("export function SummaryCards() { return null; }\n", encoding="utf-8")
+
+            coder = CoderAgent(AgentConfig(workspace_dir=temp_dir), CapturingCoderLLM())
+            result = coder._apply_operation(
+                FileEditor(temp_dir),
+                {"workspace_dir": temp_dir},
+                {
+                    "type": "create_file",
+                    "file_path": "components/dashboard/summary-cards.tsx",
+                    "content": "export function SummaryCards() { return <div>Updated</div>; }\n",
+                },
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["operation"], "write_file")
+            self.assertIn("Updated", target.read_text(encoding="utf-8"))
+
+    def test_retry_context_expands_nextjs_route_bundle_focus_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "app/dashboard").mkdir(parents=True)
+            for relative_path in ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"]:
+                (workspace / relative_path).write_text("export default function Page() { return null; }\n", encoding="utf-8")
+
+            coder = CoderAgent(AgentConfig(workspace_dir=temp_dir), CapturingCoderLLM())
+            context = coder._remediation_context(
+                {
+                    "workspace_dir": temp_dir,
+                    "workspace_profile": {
+                        "nextjs": {
+                            "router_type": "app",
+                            "app_dir": "app",
+                            "pages_dir": None,
+                            "component_directories": ["components"],
+                        }
+                    },
+                    "retry_count": 1,
+                    "review_summary": {
+                        "status": "changes_required",
+                        "remediation": {
+                            "required": True,
+                            "failed_validation_labels": ["script:test"],
+                            "blocked_file_paths": [],
+                            "failed_operations": [],
+                            "focus_areas": ["app/dashboard/page.tsx"],
+                            "guidance": ["Repair the dashboard route bundle."],
+                        },
+                    },
+                }
+            )
+
+            self.assertEqual(context["focus_areas"], ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"])
 
 
 if __name__ == "__main__":

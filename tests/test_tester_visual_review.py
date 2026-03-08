@@ -184,6 +184,81 @@ class TestTesterVisualReview(unittest.TestCase):
             self.assertEqual(visual_review["responsive_review"]["missing_categories"], ["mobile"])
             self.assertFalse(visual_review["responsive_review"]["passed"])
 
+    def test_build_visual_review_detects_success_state_keyword(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "app/dashboard").mkdir(parents=True)
+            (temp_path / "components/dashboard").mkdir(parents=True)
+            (temp_path / "app/dashboard/page.tsx").write_text("export default function Page() { return null; }", encoding="utf-8")
+            (temp_path / "app/dashboard/loading.tsx").write_text("export default function Loading() { return null; }", encoding="utf-8")
+            (temp_path / "app/dashboard/error.tsx").write_text("export default function Error() { return null; }", encoding="utf-8")
+            (temp_path / "components/dashboard/dashboard-shell.tsx").write_text(
+                '\n'.join(
+                    [
+                        'const state = "success";',
+                        'if (state === "loading") return null;',
+                        'if (state === "empty") return null;',
+                        'if (state === "error") return null;',
+                        'if (state === "success") return null;',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            state = {
+                "workspace_dir": temp_dir,
+                "patches": [
+                    {"file": "app/dashboard/page.tsx"},
+                    {"file": "app/dashboard/loading.tsx"},
+                    {"file": "app/dashboard/error.tsx"},
+                    {"file": "components/dashboard/dashboard-shell.tsx"},
+                ],
+                "planning_context": {"design_brief": {"style_keywords": ["editorial"]}},
+            }
+            workspace_profile = {"nextjs": {"router_type": "app"}}
+
+            visual_review = self.agent._build_visual_review(state, workspace_profile, [])
+
+            self.assertTrue(visual_review["state_coverage"]["success_state"])
+
+    def test_build_visual_review_detects_single_quoted_state_markers_in_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "app").mkdir(parents=True)
+            (temp_path / "components/dashboard").mkdir(parents=True)
+            (temp_path / "app/page.tsx").write_text(
+                '\n'.join(
+                    [
+                        "const state = 'success';",
+                        "if (state === 'loading') return null;",
+                        "if (state === 'empty') return null;",
+                        "if (state === 'error') return null;",
+                        "if (state === 'success') return null;",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (temp_path / "app/loading.tsx").write_text("export default function Loading() { return null; }", encoding="utf-8")
+            (temp_path / "app/error.tsx").write_text("export default function Error() { return null; }", encoding="utf-8")
+
+            state = {
+                "workspace_dir": temp_dir,
+                "patches": [
+                    {"file": "app/page.tsx"},
+                    {"file": "app/loading.tsx"},
+                    {"file": "app/error.tsx"},
+                ],
+                "planning_context": {"design_brief": {"style_keywords": ["editorial"]}},
+            }
+            workspace_profile = {"nextjs": {"router_type": "app"}}
+
+            visual_review = self.agent._build_visual_review(state, workspace_profile, [])
+
+            self.assertTrue(visual_review["state_coverage"]["loading_state"])
+            self.assertTrue(visual_review["state_coverage"]["empty_state"])
+            self.assertTrue(visual_review["state_coverage"]["error_state"])
+            self.assertTrue(visual_review["state_coverage"]["success_state"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from ai_code_agent.config import AgentConfig
+from ai_code_agent.tools.sandbox import SandboxRunner
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,6 +26,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["quick", "full"],
         default="full",
         help="Validation mode: quick runs compile and unit tests only; full adds framework smoke checks and retrieval evaluation.",
+    )
+    parser.add_argument(
+        "--require-docker-sandbox",
+        action="store_true",
+        help="Fail validation early unless the Docker sandbox backend is ready with the configured image.",
     )
     return parser.parse_args(argv)
 
@@ -53,8 +61,39 @@ def _run_step(step: ValidationStep) -> int:
     return 0
 
 
+def sandbox_preflight(config: AgentConfig) -> dict[str, object]:
+    return SandboxRunner(config.docker_image, workspace_dir=str(REPO_ROOT), mode=config.sandbox_mode).probe()
+
+
+def _print_sandbox_preflight(report: dict[str, object]) -> None:
+    print("==> sandbox preflight")
+    print(f"requested_mode={report.get('requested_mode')}")
+    print(f"resolved_mode={report.get('resolved_mode')}")
+    print(f"image={report.get('image')}")
+    print(f"degraded={report.get('degraded')}")
+    if report.get("fallback_reason"):
+        print(f"fallback_reason={report.get('fallback_reason')}")
+    if report.get("recommendation"):
+        print(f"recommendation={report.get('recommendation')}")
+
+
+def _sandbox_preflight_exit_code(report: dict[str, object], *, require_docker_sandbox: bool) -> int:
+    if not require_docker_sandbox:
+        return 0
+    if report.get("docker_sandbox_ready"):
+        return 0
+    print("FAILED: sandbox preflight (docker sandbox required but not ready)")
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    config = AgentConfig()
+    preflight = sandbox_preflight(config)
+    _print_sandbox_preflight(preflight)
+    preflight_exit_code = _sandbox_preflight_exit_code(preflight, require_docker_sandbox=args.require_docker_sandbox)
+    if preflight_exit_code != 0:
+        return preflight_exit_code
     steps = get_validation_steps(args.mode)
 
     for step in steps:

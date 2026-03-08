@@ -296,6 +296,24 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(plan["stop_retry_after_failure"], True)
         self.assertEqual(plan["stop_reason"], "history_low_recovery_probability")
 
+    def test_build_nextjs_plan_without_lint_script_skips_next_lint(self) -> None:
+        workspace_profile = {
+            "has_python": False,
+            "has_package_json": True,
+            "needs_install": True,
+            "package_manager": "npm",
+            "frameworks": ["nextjs"],
+            "scripts": ["typecheck", "build"],
+            "nextjs": {"router_type": "app"},
+            "tsconfig_exists": True,
+            "lockfiles": ["package-lock.json"],
+        }
+
+        plan = self.agent._build_validation_plan({"workspace_dir": ".", "retry_count": 0}, workspace_profile)
+
+        self.assertEqual(plan["selected_labels"], ["package-install", "script:typecheck", "script:build", "next:router-detected"])
+        self.assertNotIn("next:lint", plan["selected_labels"])
+
 
 if __name__ == "__main__":
     unittest.main()

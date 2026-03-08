@@ -4,6 +4,18 @@ import shutil
 import subprocess
 
 
+def _text_run_kwargs(**overrides):
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "check": False,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
 class SandboxRunner:
     """
     Executes commands inside a safe, isolated container (e.g., Docker).
@@ -80,9 +92,7 @@ class SandboxRunner:
 
         result = subprocess.run(
             ["docker", "image", "inspect", self.image],
-            capture_output=True,
-            text=True,
-            check=False,
+            **_text_run_kwargs(),
         )
         image_available = result.returncode == 0
         self.startup_details["image_available"] = image_available
@@ -114,6 +124,23 @@ class SandboxRunner:
         self.mode = "docker"
         self.startup_details.update({"resolved_mode": "docker", "started": True})
         return dict(self.startup_details)
+
+    def probe(self) -> dict[str, object]:
+        startup = self.start_container()
+        fallback_reason = startup.get("fallback_reason") if isinstance(startup, dict) else None
+        recommendation = None
+        if fallback_reason == "docker_unavailable":
+            recommendation = "Install Docker Desktop or set SANDBOX_MODE=local when Docker is not required."
+        elif fallback_reason == "docker_image_missing":
+            recommendation = f"Build the sandbox image with: docker build -t {self.image} ."
+
+        return {
+            **startup,
+            "image": self.image,
+            "docker_sandbox_ready": startup.get("resolved_mode") == "docker",
+            "degraded": bool(fallback_reason),
+            "recommendation": recommendation,
+        }
         
     def execute(self, cmd: str, timeout: int = 60, env: dict[str, str] | None = None) -> dict:
         """
@@ -160,17 +187,14 @@ class SandboxRunner:
                     "-lc",
                     cmd,
                 ])
-                result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout, check=False)
+                result = subprocess.run(docker_cmd, **_text_run_kwargs(timeout=timeout))
             else:
                 result = subprocess.run(
                     cmd,
                     cwd=self.workspace,
                     shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    check=False,
                     env=runtime_env,
+                    **_text_run_kwargs(timeout=timeout),
                 )
             stdout = result.stdout
             stderr = result.stderr

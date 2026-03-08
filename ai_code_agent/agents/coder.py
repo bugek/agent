@@ -202,7 +202,10 @@ class CoderAgent(BaseAgent):
                 continue
             deduplicated.append(normalized)
             seen.add(normalized)
-        return deduplicated[:5]
+        workspace_profile = state.get("workspace_profile") if isinstance(state.get("workspace_profile"), dict) else {}
+        deduplicated = self._expand_nextjs_route_bundle_files(deduplicated, workspace_profile)
+        existing = [file_path for file_path in deduplicated if self._exists(state, file_path)]
+        return existing[:5]
 
     def _remediation_context(self, state: AgentState) -> dict[str, Any] | None:
         if int(state.get("retry_count", 0) or 0) <= 0:
@@ -244,6 +247,8 @@ class CoderAgent(BaseAgent):
             ],
             "testing_summary": state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {},
         }
+        workspace_profile = state.get("workspace_profile") if isinstance(state.get("workspace_profile"), dict) else {}
+        context["focus_areas"] = self._expand_nextjs_route_bundle_files(context["focus_areas"], workspace_profile)
         if not any(
             context[key]
             for key in ["failed_validation_labels", "blocked_file_paths", "failed_operations", "focus_areas", "guidance"]
@@ -279,6 +284,7 @@ class CoderAgent(BaseAgent):
 
     def _apply_operation(self, editor: FileEditor, state: AgentState, operation: dict[str, Any]) -> dict | None:
         operation_type = operation.get("type", "replace_text")
+        applied_operation_type = operation_type
         file_path = operation.get("file_path")
         if not file_path:
             return None
@@ -297,9 +303,12 @@ class CoderAgent(BaseAgent):
                 return None
         elif operation_type == "create_file":
             content = operation.get("content")
-            if content is None or absolute_path.exists():
+            if content is None:
                 return None
-            if not editor.create_file(file_path, content):
+            if absolute_path.exists():
+                applied_operation_type = "write_file"
+                editor.write_file(file_path, content)
+            elif not editor.create_file(file_path, content):
                 return None
         elif operation_type == "write_file":
             content = operation.get("content")
@@ -331,7 +340,7 @@ class CoderAgent(BaseAgent):
         )
         return {
             "file": file_path,
-            "operation": operation_type,
+            "operation": applied_operation_type,
             "diff": diff,
         }
 
@@ -359,7 +368,7 @@ class CoderAgent(BaseAgent):
         if not re.search(r"\b(next|page|layout|component|api|route|handler|hero|card|form|modal|section|dashboard|screen|view)\b", lower_issue):
             return []
 
-        route_slug = self._extract_route_slug(issue)
+        route_slug = self._preferred_next_route_slug(state, nextjs_profile)
         action = "write_file" if re.search(r"\b(update|modify|refactor|revamp|rewrite|redesign)\b", lower_issue) else "create_file"
         operations: list[dict[str, Any]] = []
 
@@ -378,6 +387,16 @@ class CoderAgent(BaseAgent):
                     component_file,
                     self._next_component_template(component_request or "Feature Section", issue, route_slug, design_brief),
                     preferred_action=action,
+                )
+            )
+
+        if not editor.exists(".gitignore"):
+            operations.append(
+                self._file_operation(
+                    editor,
+                    ".gitignore",
+                    self._next_gitignore_template(),
+                    preferred_action="create_file",
                 )
             )
 
@@ -538,6 +557,24 @@ class CoderAgent(BaseAgent):
 
         return deduplicated
 
+    def _next_gitignore_template(self) -> str:
+        return "\n".join(
+            [
+                "node_modules",
+                ".next",
+                "out",
+                "coverage",
+                "dist",
+                "*.tsbuildinfo",
+                ".env.local",
+                ".env.development.local",
+                ".env.test.local",
+                ".env.production.local",
+                ".ai-code-agent/",
+                "",
+            ]
+        )
+
     def _file_operation(self, editor: FileEditor, file_path: str, content: str, preferred_action: str) -> dict[str, Any]:
         exists = editor.exists(file_path)
         operation_type = preferred_action if exists else "create_file"
@@ -550,11 +587,12 @@ class CoderAgent(BaseAgent):
         }
 
     def _extract_route_slug(self, issue: str) -> str:
-        explicit_match = re.search(r"/([a-z0-9\-/]+)", issue.lower())
+        sanitized_issue = self._sanitize_issue_for_route_detection(issue)
+        explicit_match = re.search(r"(?:(?:path|route|url|page)\s+)?/([a-z0-9\-/]+)", sanitized_issue)
         if explicit_match:
             return explicit_match.group(1).strip("/")
 
-        phrase_match = re.search(r"\b([a-z0-9-]+)\s+(?:page|screen|view|route|layout|api)\b", issue.lower())
+        phrase_match = re.search(r"\b([a-z0-9-]+)\s+(?:page|screen|view|route|layout|api)\b", sanitized_issue)
         if phrase_match:
             return phrase_match.group(1)
 
@@ -570,13 +608,89 @@ class CoderAgent(BaseAgent):
             "login",
             "signup",
         ]
-        lower_issue = issue.lower()
+        lower_issue = sanitized_issue
         for term in preferred_terms:
             if term in lower_issue:
                 return term
 
         tokens = [token for token in re.findall(r"[a-z0-9-]+", lower_issue) if token not in {"add", "create", "update", "new", "next", "component", "page", "layout", "api", "route", "handler"}]
         return tokens[0] if tokens else "feature"
+
+    def _sanitize_issue_for_route_detection(self, issue: str) -> str:
+        sanitized = re.sub(r"https?://\S+", " ", issue.lower())
+        sanitized = re.sub(r"\b(issue provider|source url|github issue|azure devops work item):[^\n]*", " ", sanitized)
+        return sanitized
+
+    def _preferred_next_route_slug(self, state: AgentState, nextjs_profile: dict[str, Any]) -> str:
+        focus_files: list[str] = []
+        for file_path in state.get("files_to_edit", []):
+            if isinstance(file_path, str):
+                focus_files.append(file_path)
+        remediation_context = self._remediation_context(state)
+        if remediation_context:
+            for file_path in remediation_context.get("focus_areas", []):
+                if isinstance(file_path, str):
+                    focus_files.append(file_path)
+
+        route_slug = self._route_slug_from_files(focus_files, nextjs_profile)
+        if route_slug is not None:
+            return route_slug
+        return self._extract_route_slug(state["issue_description"])
+
+    def _route_slug_from_files(self, file_paths: list[str], nextjs_profile: dict[str, Any]) -> str | None:
+        app_dir = (nextjs_profile.get("app_dir") or "app").replace("\\", "/")
+        pages_dir = (nextjs_profile.get("pages_dir") or "pages").replace("\\", "/")
+        for file_path in file_paths:
+            normalized = file_path.replace("\\", "/")
+            if normalized == f"{app_dir}/page.tsx":
+                return ""
+            if normalized.startswith(f"{app_dir}/") and normalized.endswith("/page.tsx"):
+                return normalized[len(app_dir) + 1 : -len("/page.tsx")]
+            if normalized == f"{pages_dir}/index.tsx":
+                return ""
+            if normalized.startswith(f"{pages_dir}/") and normalized.endswith(".tsx"):
+                return normalized[len(pages_dir) + 1 : -len(".tsx")]
+        return None
+
+    def _expand_nextjs_route_bundle_files(self, file_paths: list[str], workspace_profile: dict[str, Any]) -> list[str]:
+        nextjs_profile = workspace_profile.get("nextjs") if isinstance(workspace_profile, dict) else None
+        app_dir = "app"
+        if isinstance(nextjs_profile, dict) and nextjs_profile.get("router_type") == "app":
+            app_dir = (nextjs_profile.get("app_dir") or "app").replace("\\", "/")
+        elif not any(
+            isinstance(file_path, str)
+            and file_path.replace("\\", "/").startswith("app/")
+            and Path(file_path.replace("\\", "/")).name in {"page.tsx", "loading.tsx", "error.tsx"}
+            for file_path in file_paths
+        ):
+            return [file_path.replace("\\", "/") for file_path in file_paths if isinstance(file_path, str)]
+
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for file_path in file_paths:
+            if not isinstance(file_path, str) or not file_path:
+                continue
+            normalized = file_path.replace("\\", "/")
+            candidates = [normalized]
+            route_dir = self._next_route_dir_for_file(normalized, app_dir)
+            if route_dir is not None:
+                candidates.extend([f"{route_dir}/page.tsx", f"{route_dir}/loading.tsx", f"{route_dir}/error.tsx"])
+            for candidate in candidates:
+                if candidate not in seen:
+                    expanded.append(candidate)
+                    seen.add(candidate)
+        return expanded
+
+    def _next_route_dir_for_file(self, file_path: str, app_dir: str) -> str | None:
+        normalized = file_path.replace("\\", "/")
+        file_name = Path(normalized).name
+        if normalized in {f"{app_dir}/page.tsx", f"{app_dir}/loading.tsx", f"{app_dir}/error.tsx"}:
+            return app_dir
+        if not normalized.startswith(f"{app_dir}/"):
+            return None
+        if file_name not in {"page.tsx", "loading.tsx", "error.tsx"}:
+            return None
+        return normalized.rsplit("/", 1)[0]
 
     def _extract_component_request(self, issue: str, route_slug: str) -> str | None:
         specific_matches = re.findall(

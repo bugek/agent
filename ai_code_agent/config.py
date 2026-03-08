@@ -33,6 +33,7 @@ class AgentConfig:
     openrouter_base_url: str = field(default_factory=lambda: os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
     openrouter_app_name: str = field(default_factory=lambda: os.getenv("OPENROUTER_APP_NAME", "ai-code-agent"))
     openrouter_site_url: Optional[str] = field(default_factory=lambda: os.getenv("OPENROUTER_SITE_URL"))
+    llm_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "45")))
     
     # Integrations
     github_token: Optional[str] = field(default_factory=lambda: os.getenv("GITHUB_TOKEN"))

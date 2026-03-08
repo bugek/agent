@@ -263,10 +263,16 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
             mock_git_ops.return_value.create_branch.return_value = True
             mock_git_ops.return_value.commit_changes.return_value = True
             mock_git_ops.return_value.push_branch.return_value = True
-            mock_create_remote_pr.return_value = (
-                "https://github.com/octo/repo/pull/9",
-                "Committed, pushed, and opened GitHub PR: https://github.com/octo/repo/pull/9",
-            )
+            mock_create_remote_pr.return_value = {
+                "outcome": "created",
+                "reason": "opened_github_pr",
+                "provider": "github",
+                "branch_name": "ai-code-agent/gh-42-fix-flaky-validation",
+                "base_branch": "main",
+                "pr_url": "https://github.com/octo/repo/pull/9",
+                "message": "Committed, pushed, and opened GitHub PR: https://github.com/octo/repo/pull/9",
+                "error": None,
+            }
 
             result = orchestrator.create_pr_node(
                 {
@@ -281,9 +287,34 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
 
         event = result["execution_events"][-1]
         self.assertEqual(result["created_pr_url"], "https://github.com/octo/repo/pull/9")
+        self.assertEqual(result["create_pr_result"]["outcome"], "created")
         self.assertEqual(event["details"]["created_pr_url"], "https://github.com/octo/repo/pull/9")
+        self.assertEqual(event["details"]["outcome"], "created")
+        self.assertEqual(event["details"]["reason"], "opened_github_pr")
         self.assertEqual(event["details"]["issue_provider"], "github")
         self.assertIn("ai-code-agent/gh-42-fix-flaky-validation", event["details"]["branch_name"])
+
+    def test_create_pr_node_skips_git_automation_for_non_git_workspace(self) -> None:
+        with patch("ai_code_agent.orchestrator._build_runtime", return_value=(type("Config", (), {"auto_commit": True, "auto_push": True})(), None)), patch(
+            "ai_code_agent.tools.git_ops.GitOps"
+        ) as mock_git_ops:
+            mock_git_ops.return_value.is_repository.return_value = False
+
+            result = orchestrator.create_pr_node(
+                {
+                    "workspace_dir": ".",
+                    "issue_description": "add users endpoint",
+                    "patches": [{"file": "src/users/users.controller.ts", "diff": "..."}],
+                    "issue_context": {"provider": "github", "issue_number": 42, "title": "Add users endpoint"},
+                    "execution_log": [],
+                    "execution_events": [],
+                }
+            )
+
+        self.assertIsNone(result["created_pr_url"])
+        self.assertEqual(result["create_pr_result"]["outcome"], "skipped")
+        self.assertEqual(result["create_pr_result"]["reason"], "non_git_workspace")
+        self.assertIn("not a git repository", result["create_pr_result"]["message"])
 
 
 if __name__ == "__main__":

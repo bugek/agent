@@ -42,6 +42,32 @@ class SandboxRunnerTest(unittest.TestCase):
         self.assertTrue(startup["started"])
         self.assertIsNone(startup["fallback_reason"])
 
+    def test_execute_uses_utf8_replace_decoding_for_local_commands(self) -> None:
+        command_result = subprocess.CompletedProcess(["python"], 0, stdout="ok", stderr="")
+        with patch("ai_code_agent.tools.sandbox.subprocess.run", return_value=command_result) as mock_run:
+            runner = SandboxRunner("demo-image", workspace_dir=".", mode="local")
+            runner.container_started = True
+
+            runner.execute("python -V")
+
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
+
+    def test_probe_reports_recommendation_when_docker_image_is_missing(self) -> None:
+        inspect_result = subprocess.CompletedProcess(["docker", "image", "inspect"], 1, stdout="", stderr="missing")
+        with patch("ai_code_agent.tools.sandbox.shutil.which", return_value="docker"), patch(
+            "ai_code_agent.tools.sandbox.subprocess.run", return_value=inspect_result
+        ):
+            runner = SandboxRunner("demo-image", workspace_dir=".", mode="auto")
+            report = runner.probe()
+
+        self.assertEqual(report["resolved_mode"], "local")
+        self.assertEqual(report["fallback_reason"], "docker_image_missing")
+        self.assertTrue(report["degraded"])
+        self.assertFalse(report["docker_sandbox_ready"])
+        self.assertIn("docker build -t demo-image .", report["recommendation"])
+
 
 if __name__ == "__main__":
     unittest.main()

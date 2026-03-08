@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from ai_code_agent.agents.reviewer import ReviewerAgent
@@ -12,6 +13,20 @@ class StubLLM:
 
     def generate_json(self, system_prompt: str, user_prompt: str, schema: dict | None = None) -> dict:
         return dict(self._response)
+
+
+class RaisingStubLLM:
+    def generate_json(self, system_prompt: str, user_prompt: str, schema: dict | None = None) -> dict:
+        raise TimeoutError("review timeout")
+
+
+class CapturingReviewLLM:
+    def __init__(self) -> None:
+        self.payload: dict | None = None
+
+    def generate_json(self, system_prompt: str, user_prompt: str, schema: dict | None = None) -> dict:
+        self.payload = json.loads(user_prompt)
+        return {"review_comments": [], "review_approved": True}
 
 
 class ReviewerSummaryTest(unittest.TestCase):
@@ -97,6 +112,61 @@ class ReviewerSummaryTest(unittest.TestCase):
         self.assertEqual(remediation["failed_operations"], ["replace_text failed for src/users/users.controller.ts"])
         self.assertIn("src/users/users.controller.ts", remediation["focus_areas"])
         self.assertIn("Fix the failing compile step in the generated controller.", remediation["guidance"])
+
+    def test_reviewer_falls_back_when_llm_review_fails(self) -> None:
+        reviewer = ReviewerAgent(AgentConfig(workspace_dir="."), RaisingStubLLM())
+
+        result = reviewer.run(
+            {
+                "issue_description": "update dashboard page",
+                "workspace_dir": ".",
+                "patches": [{"file": "app/page.tsx"}],
+                "test_passed": True,
+                "test_results": "script:build(exit=0):\n",
+                "codegen_summary": {},
+                "visual_review": None,
+            }
+        )
+
+        self.assertTrue(result["review_approved"])
+        self.assertIn("Reviewer LLM request failed; using deterministic fallback review.", result["review_comments"])
+
+    def test_reviewer_payload_ignores_responsive_gaps_without_screenshots(self) -> None:
+        llm = CapturingReviewLLM()
+        reviewer = ReviewerAgent(AgentConfig(workspace_dir="."), llm)
+
+        reviewer.run(
+            {
+                "issue_description": "update dashboard page",
+                "workspace_dir": ".",
+                "patches": [{"file": "app/page.tsx"}],
+                "test_passed": True,
+                "test_results": "script:build(exit=0):\n",
+                "codegen_summary": {},
+                "visual_review": {
+                    "enabled": True,
+                    "screenshot_status": "not_configured",
+                    "state_coverage": {
+                        "loading_file": True,
+                        "error_file": True,
+                        "loading_state": True,
+                        "empty_state": True,
+                        "error_state": True,
+                        "success_state": True,
+                    },
+                    "responsive_review": {
+                        "categories_present": [],
+                        "missing_categories": ["desktop", "mobile"],
+                        "missing_viewport_metadata": [".ai-code-agent/visual-review/screenshots/demo.png"],
+                    },
+                },
+            }
+        )
+
+        self.assertIsNotNone(llm.payload)
+        self.assertEqual(llm.payload["visual_review"]["responsive_review"]["missing_categories"], [])
+        self.assertEqual(llm.payload["visual_review"]["responsive_review"]["missing_viewport_metadata"], [])
+        self.assertEqual(llm.payload["visual_review"]["responsive_review"]["passed"], True)
 
 
 if __name__ == "__main__":

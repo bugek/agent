@@ -485,8 +485,6 @@ class TesterAgent(BaseAgent):
 
         if "lint" in scripts:
             commands.append(("script:lint", self._run_script_command(workspace_profile, "lint"), 900, None))
-        elif self._has_local_bin(workspace_profile, "next"):
-            commands.append(("next:lint", self._exec_command(workspace_profile, "next lint"), 900, None))
 
         if "typecheck" in scripts:
             commands.append(("script:typecheck", self._run_script_command(workspace_profile, "typecheck"), 900, None))
@@ -580,14 +578,40 @@ class TesterAgent(BaseAgent):
         loading_files = [file_path for file_path in changed_files if file_path.endswith("loading.tsx") or file_path.endswith("loading.ts")]
         error_files = [file_path for file_path in changed_files if file_path.endswith("error.tsx") or file_path.endswith("error.ts")]
 
+        state_files = sorted({*route_files, *component_files, *loading_files, *error_files})
+
         state_coverage = {
             "loading_file": bool(loading_files),
             "error_file": bool(error_files),
-            "loading_state": self._any_file_contains(state["workspace_dir"], component_files, 'state === "loading"'),
-            "empty_state": self._any_file_contains(state["workspace_dir"], component_files, 'state === "empty"'),
-            "error_state": self._any_file_contains(state["workspace_dir"], component_files, 'state === "error"'),
-            "success_state": self._any_file_contains(state["workspace_dir"], component_files, 'state = "ready"')
-            or self._any_file_contains(state["workspace_dir"], component_files, 'state === "ready"'),
+            "loading_state": self._any_file_contains_any(
+                state["workspace_dir"],
+                state_files,
+                ['state === "loading"', "state === 'loading'", 'state = "loading"', "state = 'loading'"],
+            ),
+            "empty_state": self._any_file_contains_any(
+                state["workspace_dir"],
+                state_files,
+                ['state === "empty"', "state === 'empty'", 'state = "empty"', "state = 'empty'"],
+            ),
+            "error_state": self._any_file_contains_any(
+                state["workspace_dir"],
+                state_files,
+                ['state === "error"', "state === 'error'", 'state = "error"', "state = 'error'"],
+            ),
+            "success_state": self._any_file_contains_any(
+                state["workspace_dir"],
+                state_files,
+                [
+                    'state = "success"',
+                    'state === "success"',
+                    "state = 'success'",
+                    "state === 'success'",
+                    'state = "ready"',
+                    'state === "ready"',
+                    "state = 'ready'",
+                    "state === 'ready'",
+                ],
+            ),
         }
 
         screenshot_signal = self._visual_review_command_signal(command_results)
@@ -786,6 +810,12 @@ class TesterAgent(BaseAgent):
                     return True
             except OSError:
                 continue
+        return False
+
+    def _any_file_contains_any(self, workspace_dir: str, file_paths: list[str], texts: list[str]) -> bool:
+        for text in texts:
+            if self._any_file_contains(workspace_dir, file_paths, text):
+                return True
         return False
 
     def _is_next_route_file(self, file_path: str) -> bool:

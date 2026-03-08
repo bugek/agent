@@ -13,12 +13,14 @@ class LLMClient:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         extra_headers: Optional[dict[str, str]] = None,
+        timeout_seconds: float = 45.0,
     ):
         self.provider = provider
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.extra_headers = extra_headers or {}
+        self.timeout_seconds = timeout_seconds
 
     @property
     def enabled(self) -> bool:
@@ -57,6 +59,7 @@ class LLMClient:
             model=resolved_model,
             base_url=base_url,
             extra_headers=extra_headers,
+            timeout_seconds=config.llm_timeout_seconds,
         )
 
     def _fallback_text(self, system_prompt: str, user_prompt: str) -> str:
@@ -83,6 +86,7 @@ class LLMClient:
             api_key=self.api_key,
             base_url=self.base_url,
             default_headers=self.extra_headers or None,
+            timeout=self.timeout_seconds,
         )
         response = client.responses.create(
             model=self.model or default_model,
@@ -102,7 +106,7 @@ class LLMClient:
     def _generate_anthropic(self, system_prompt: str, user_prompt: str) -> str:
         import anthropic
 
-        client = anthropic.Anthropic(api_key=self.api_key)
+        client = anthropic.Anthropic(api_key=self.api_key, timeout=self.timeout_seconds)
         response = client.messages.create(
             model=self.model or "claude-3-5-sonnet-latest",
             max_tokens=1500,

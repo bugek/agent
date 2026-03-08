@@ -143,6 +143,166 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["phases"]["test"]["status"], "failed")
         self.assertEqual(metrics["phases"]["test"]["duration_ms"], 37000)
 
+    def test_build_execution_metrics_marks_running_node_progress(self) -> None:
+        metrics = build_execution_metrics(
+            {
+                "run_id": "20260308T184500Z-running01",
+                "workflow_started_at": "2026-03-08T18:45:00Z",
+                "issue_description": "build monitor ui",
+                "workspace_dir": ".",
+                "execution_events": [
+                    {"timestamp": "2026-03-08T18:45:00Z", "node": "plan", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T18:45:03Z", "node": "plan", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 3000},
+                    {"timestamp": "2026-03-08T18:45:04Z", "node": "code", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                ],
+            }
+        )
+
+        self.assertEqual(metrics["workflow"]["status"], "running")
+        self.assertEqual(metrics["workflow"]["active_node"], "code")
+        self.assertEqual(metrics["phases"]["plan"]["status"], "completed")
+        self.assertEqual(metrics["phases"]["code"]["status"], "in_progress")
+        self.assertEqual(metrics["phases"]["code"]["attempts"], 1)
+        self.assertEqual(len(metrics["execution_events"]), 3)
+
+    def test_build_execution_metrics_captures_create_pr_outcome(self) -> None:
+        metrics = build_execution_metrics(
+            {
+                "run_id": "20260308T184500Z-createpr1",
+                "workflow_started_at": "2026-03-08T18:45:00Z",
+                "issue_description": "open pull request",
+                "workspace_dir": ".",
+                "test_passed": True,
+                "review_approved": True,
+                "created_pr_url": "https://github.com/octo/repo/pull/9",
+                "create_pr_result": {
+                    "outcome": "existing",
+                    "reason": "existing_open_pr",
+                    "provider": "github",
+                    "branch_name": "ai-code-agent/gh-42-fix-flaky-validation",
+                    "base_branch": "main",
+                    "pr_url": "https://github.com/octo/repo/pull/9",
+                    "message": "Pushed branch, and found existing open GitHub PR: https://github.com/octo/repo/pull/9",
+                    "error": None,
+                },
+                "execution_events": [
+                    {"timestamp": "2026-03-08T18:45:00Z", "node": "plan", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T18:45:02Z", "node": "plan", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 2000},
+                    {"timestamp": "2026-03-08T18:45:03Z", "node": "create_pr", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T18:45:05Z", "node": "create_pr", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 2000},
+                ],
+            }
+        )
+
+        self.assertEqual(metrics["workflow"]["created_pr"], False)
+        self.assertEqual(metrics["workflow"]["linked_pr"], True)
+        self.assertEqual(metrics["failures"]["has_failure"], False)
+        self.assertIsNone(metrics["failures"]["primary_category"])
+        self.assertIsNone(metrics["failures"]["subcategory"])
+        self.assertEqual(metrics["create_pr"]["outcome"], "existing")
+        self.assertEqual(metrics["create_pr"]["reason"], "existing_open_pr")
+        self.assertEqual(metrics["phases"]["create_pr"]["status"], "existing")
+
+    def test_build_execution_metrics_does_not_report_smoke_test_failure_when_tests_not_run(self) -> None:
+        metrics = build_execution_metrics(
+            {
+                "run_id": "20260308T110000Z-deadbeef",
+                "workflow_started_at": "2026-03-08T11:00:00Z",
+                "issue_description": "create dashboard",
+                "workspace_dir": ".",
+                "patches": [{"file": "app/page.tsx"}],
+                "test_passed": False,
+                "test_results": None,
+                "review_comments": [],
+                "review_approved": False,
+                "review_summary": {},
+                "execution_events": [
+                    {"timestamp": "2026-03-08T11:00:00Z", "node": "plan", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T11:00:05Z", "node": "plan", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 5000},
+                    {"timestamp": "2026-03-08T11:00:06Z", "node": "code", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T11:00:10Z", "node": "code", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 4000},
+                ],
+            }
+        )
+
+        self.assertEqual(metrics["testing"]["status"], "not_run")
+        self.assertIsNone(metrics["failures"]["error_message"])
+
+    def test_build_execution_metrics_ignores_responsive_gap_when_screenshots_not_configured(self) -> None:
+        metrics = build_execution_metrics(
+            {
+                "run_id": "20260308T110500Z-deadbeef",
+                "workflow_started_at": "2026-03-08T11:05:00Z",
+                "issue_description": "update dashboard page",
+                "workspace_dir": ".",
+                "patches": [{"file": "app/page.tsx"}],
+                "test_results": "script:build(exit=1):\nboom\n",
+                "test_passed": False,
+                "visual_review": {
+                    "enabled": True,
+                    "screenshot_status": "not_configured",
+                    "artifact_count": 0,
+                    "state_coverage": {
+                        "loading_file": True,
+                        "error_file": True,
+                        "loading_state": True,
+                        "empty_state": True,
+                        "error_state": True,
+                        "success_state": True,
+                    },
+                    "responsive_review": {"missing_categories": ["mobile", "desktop"]},
+                },
+                "review_comments": ["Smoke tests failed."],
+                "review_approved": False,
+                "review_summary": {
+                    "status": "changes_required",
+                    "validation": {"passed": [], "failed": ["script:build"]},
+                    "visual_review": {
+                        "screenshot_status": "not_configured",
+                        "artifact_count": 0,
+                        "missing_states": [],
+                        "missing_responsive_categories": ["mobile", "desktop"],
+                    },
+                    "residual_risks": ["Smoke tests failed."],
+                },
+                "execution_events": [
+                    {"timestamp": "2026-03-08T11:05:00Z", "node": "plan", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T11:05:05Z", "node": "plan", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 5000},
+                    {"timestamp": "2026-03-08T11:05:06Z", "node": "code", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T11:05:10Z", "node": "code", "event_type": "node_completed", "attempt": 1, "status": "completed", "duration_ms": 4000},
+                    {"timestamp": "2026-03-08T11:05:11Z", "node": "test", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T11:05:16Z", "node": "test", "event_type": "node_completed", "attempt": 1, "status": "failed", "duration_ms": 5000},
+                    {"timestamp": "2026-03-08T11:05:17Z", "node": "review", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
+                    {"timestamp": "2026-03-08T11:05:19Z", "node": "review", "event_type": "node_completed", "attempt": 1, "status": "changes_required", "duration_ms": 2000},
+                ],
+            }
+        )
+
+        self.assertEqual(metrics["failures"]["subcategory"], "command:script:build")
+
+    def test_trend_ignores_legacy_unknown_failure_for_approved_run(self) -> None:
+        from ai_code_agent.metrics import build_execution_metrics_trend
+
+        trend = build_execution_metrics_trend(
+            [
+                (
+                    {
+                        "run_id": "run-legacy-approved",
+                        "workflow": {"status": "approved", "duration_ms": 100, "attempt_count": 1, "terminal_node": "create_pr"},
+                        "failures": {"has_failure": False, "primary_category": "unknown", "subcategory": "unknown_failure"},
+                        "testing": {"failed_commands": [], "total_duration_ms": 40, "validation_strategy": "full", "commands": []},
+                        "review": {"status": "approved", "residual_risk_count": 0},
+                    },
+                    ".ai-code-agent/runs/run-legacy-approved/metrics.json",
+                )
+            ]
+        )
+
+        self.assertEqual(trend["primary_failure_categories"], {})
+        self.assertEqual(trend["primary_failure_subcategories"], {})
+        self.assertEqual(trend["dashboard"]["latest_failure_category"], None)
+        self.assertEqual(trend["dashboard"]["latest_failure_subcategory"], None)
+
 
 if __name__ == "__main__":
     unittest.main()

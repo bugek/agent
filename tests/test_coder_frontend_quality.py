@@ -100,10 +100,22 @@ class CoderFrontendQualityTest(unittest.TestCase):
             operations = self.coder._build_nextjs_operations(state, workspace_profile, editor)
 
         file_paths = {operation["file_path"] for operation in operations}
+        self.assertIn(".gitignore", file_paths)
         self.assertIn("app/dashboard/page.tsx", file_paths)
         self.assertIn("components/dashboard-hero.tsx", file_paths)
         self.assertIn("app/dashboard/loading.tsx", file_paths)
         self.assertIn("app/dashboard/error.tsx", file_paths)
+
+    def test_extract_route_slug_ignores_github_issue_url_noise(self) -> None:
+        issue = (
+            "Issue provider: github\n"
+            "Source URL: https://github.com/bugek/next-test-agent/issues/1\n"
+            "GitHub issue: bugek/next-test-agent#1\n"
+            "Title: Create SmartFarm sample dashboard\n\n"
+            "Description:\nBuild a SmartFarm sample dashboard in Next.js."
+        )
+
+        self.assertEqual(self.coder._extract_route_slug(issue), "dashboard")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +16,7 @@ EXECUTION_RUNS_ROOT = Path(".ai-code-agent") / "runs"
 EXECUTION_METRICS_FILE = "metrics.json"
 DIAGNOSTICS_ROOT = Path(".ai-code-agent") / "diagnostics"
 DIAGNOSTICS_SUMMARY_PREFIX = "diagnose"
+DIAGNOSTICS_SUMMARY_SCHEMA_VERSION = "diagnostics-summary/v2"
 
 
 def utc_now_iso() -> str:
@@ -36,6 +39,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
     visual_review = state.get("visual_review") if isinstance(state.get("visual_review"), dict) else None
     testing_summary = state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {}
     review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
+    create_pr_result = state.get("create_pr_result") if isinstance(state.get("create_pr_result"), dict) else {}
     test_signals = _extract_validation_signals(state.get("test_results", ""))
     distinct_changed_files = sorted(
         {
@@ -45,14 +49,16 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
         }
     )
     analysis_only = bool(re.search(r"\b(analyze|inspect|summari[sz]e|review|readiness)\b", state.get("issue_description", ""), re.I))
-    failure_categories = _failure_categories(state, test_signals, review_summary, codegen_summary)
+    has_failure = not (bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)))
+    failure_categories = _failure_categories(state, test_signals, review_summary, codegen_summary) if has_failure else []
 
     primary_category = failure_categories[0] if failure_categories else None
-    failure_subcategory = _failure_subcategory(state, primary_category, test_signals, review_summary, codegen_summary)
+    failure_subcategory = _failure_subcategory(state, primary_category, test_signals, review_summary, codegen_summary) if has_failure else None
 
     return {
         "schema_version": "execution-metrics/v1",
         "run_id": run_id,
+        "execution_events": execution_events,
         "issue": {
             "mode": "analysis_only" if analysis_only else "change_request",
             "analysis_only": analysis_only,
@@ -67,7 +73,9 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "retry_count": _as_int(state.get("retry_count")),
             "attempt_count": max(1, _as_int(state.get("retry_count")) + 1),
             "terminal_node": execution_events[-1].get("node") if execution_events else None,
-            "created_pr": bool(state.get("created_pr_url")),
+            "active_node": _active_node(execution_events),
+            "created_pr": create_pr_result.get("outcome") == "created",
+            "linked_pr": bool(state.get("created_pr_url")),
         },
         "workspace": {
             "path": state.get("workspace_dir"),
@@ -130,6 +138,16 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "validation_failed_count": _count_items((review_summary.get("validation") or {}).get("failed")),
             "remediation_required": bool((review_summary.get("remediation") or {}).get("required")),
         },
+        "create_pr": {
+            "outcome": create_pr_result.get("outcome"),
+            "reason": create_pr_result.get("reason"),
+            "provider": create_pr_result.get("provider"),
+            "branch_name": create_pr_result.get("branch_name"),
+            "base_branch": create_pr_result.get("base_branch"),
+            "pr_url": state.get("created_pr_url") or create_pr_result.get("pr_url"),
+            "message": create_pr_result.get("message"),
+            "error": create_pr_result.get("error"),
+        },
         "effectiveness": {
             "retry_attempted": _as_int(state.get("retry_count")) > 0,
             "retry_recovered": _as_int(state.get("retry_count")) > 0 and bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)),
@@ -142,7 +160,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "command_reduction_rate": _command_reduction_rate(testing_summary),
         },
         "failures": {
-            "has_failure": not (bool(state.get("review_approved", False)) and bool(state.get("test_passed", False))),
+            "has_failure": has_failure,
             "primary_category": primary_category,
             "subcategory": failure_subcategory,
             "categories": failure_categories,
@@ -182,7 +200,7 @@ def build_diagnostics_summary(
     latest_path = metrics_entries[0][1] if metrics_entries else None
     rows = [_diagnostics_summary_row(metrics, path) for metrics, path in metrics_entries]
     return {
-        "schema_version": "diagnostics-summary/v1",
+        "schema_version": DIAGNOSTICS_SUMMARY_SCHEMA_VERSION,
         "generated_at": utc_now_iso(),
         "recent": max(1, recent),
         "filters": filters,
@@ -229,6 +247,8 @@ def load_fresh_diagnostics_summary_artifact(
     summary = _load_metrics_file(summary_path)
     if summary is None:
         return None, None
+    if summary.get("schema_version") != DIAGNOSTICS_SUMMARY_SCHEMA_VERSION:
+        return None, None
 
     try:
         summary_mtime = summary_path.stat().st_mtime
@@ -266,7 +286,7 @@ def load_execution_metrics_artifact(
     else:
         candidates = sorted(
             runs_root.glob(f"*/{EXECUTION_METRICS_FILE}"),
-            key=lambda path: path.stat().st_mtime,
+            key=_metrics_artifact_sort_key,
             reverse=True,
         )
 
@@ -292,7 +312,7 @@ def list_execution_metrics_artifacts(
     results: list[tuple[dict[str, Any], str]] = []
     candidates = sorted(
         runs_root.glob(f"*/{EXECUTION_METRICS_FILE}"),
-        key=lambda path: path.stat().st_mtime,
+        key=_metrics_artifact_sort_key,
         reverse=True,
     )
     for metrics_path in candidates:
@@ -303,6 +323,88 @@ def list_execution_metrics_artifacts(
         if len(results) >= resolved_limit:
             break
     return results
+
+
+def normalize_execution_metrics_payload(metrics: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(metrics))
+    workflow = normalized.get("workflow") if isinstance(normalized.get("workflow"), dict) else {}
+    failures = normalized.get("failures") if isinstance(normalized.get("failures"), dict) else {}
+    create_pr = normalized.get("create_pr") if isinstance(normalized.get("create_pr"), dict) else {}
+    execution_events = normalized.get("execution_events") if isinstance(normalized.get("execution_events"), list) else []
+
+    if workflow.get("status") == "approved" or failures.get("has_failure") is False:
+        normalized["failures"] = {
+            **failures,
+            "has_failure": False,
+            "primary_category": None,
+            "subcategory": None,
+            "categories": [],
+            "taxonomy": {"category": None, "subcategory": None},
+        }
+
+    if not create_pr:
+        create_pr = _legacy_create_pr_from_metrics(normalized, execution_events)
+        if create_pr:
+            normalized["create_pr"] = create_pr
+
+    workflow = normalized.get("workflow") if isinstance(normalized.get("workflow"), dict) else {}
+    if create_pr:
+        workflow["linked_pr"] = bool(create_pr.get("pr_url"))
+        workflow["created_pr"] = create_pr.get("outcome") == "created"
+        normalized["workflow"] = workflow
+
+    return normalized
+
+
+def normalize_execution_metrics_artifacts(workspace_dir: str | None, run_id: str | None = None) -> dict[str, int]:
+    if not workspace_dir:
+        return {"checked": 0, "updated": 0, "diagnostics_removed": 0}
+
+    runs_root = Path(workspace_dir) / EXECUTION_RUNS_ROOT
+    if not runs_root.exists():
+        return {"checked": 0, "updated": 0, "diagnostics_removed": 0}
+
+    candidates = [runs_root / run_id / EXECUTION_METRICS_FILE] if run_id else sorted(runs_root.glob(f"*/{EXECUTION_METRICS_FILE}"))
+    checked = 0
+    updated = 0
+    for metrics_path in candidates:
+        metrics = _load_metrics_file(metrics_path)
+        if metrics is None:
+            continue
+        checked += 1
+        normalized = normalize_execution_metrics_payload(metrics)
+        if normalized != metrics:
+            try:
+                original_stat = metrics_path.stat()
+            except OSError:
+                original_stat = None
+            temporary_path = metrics_path.with_suffix(metrics_path.suffix + ".tmp")
+            temporary_path.write_text(json.dumps(normalized, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            temporary_path.replace(metrics_path)
+            if original_stat is not None:
+                try:
+                    os.utime(metrics_path, (original_stat.st_atime, original_stat.st_mtime))
+                except OSError:
+                    pass
+            updated += 1
+
+    diagnostics_removed = 0
+    diagnostics_dir = Path(workspace_dir) / DIAGNOSTICS_ROOT
+    if diagnostics_dir.exists():
+        for summary_path in diagnostics_dir.glob("*.json"):
+            try:
+                summary_path.unlink()
+                diagnostics_removed += 1
+            except OSError:
+                continue
+        if diagnostics_removed == 0:
+            try:
+                shutil.rmtree(diagnostics_dir)
+                diagnostics_removed = 1
+            except OSError:
+                pass
+
+    return {"checked": checked, "updated": updated, "diagnostics_removed": diagnostics_removed}
 
 
 def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], str]]) -> dict[str, Any]:
@@ -319,6 +421,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "primary_failure_categories": {},
             "primary_failure_subcategories": {},
             "validation_strategies": {},
+            "create_pr_outcomes": {},
             "effectiveness": {
                 "retry_runs": 0,
                 "retry_recovered_runs": 0,
@@ -422,6 +525,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
     validation_strategy_counts: dict[str, int] = {}
+    create_pr_outcomes: dict[str, int] = {}
     retry_policy_stop_reasons: dict[str, int] = {}
     sandbox_fallback_reasons: dict[str, int] = {}
     strategy_stats: dict[str, dict[str, float | int]] = {
@@ -457,6 +561,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         planning = metrics.get("planning") if isinstance(metrics.get("planning"), dict) else {}
         coding = metrics.get("coding") if isinstance(metrics.get("coding"), dict) else {}
         testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+        create_pr = metrics.get("create_pr") if isinstance(metrics.get("create_pr"), dict) else {}
         failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
         status = workflow.get("status")
         terminal_node = workflow.get("terminal_node")
@@ -473,8 +578,9 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         if status != "aborted":
             total_duration_ms += _as_int(workflow.get("duration_ms"))
             total_testing_duration_ms += _as_int(testing.get("total_duration_ms"))
-        primary_category = failures.get("primary_category")
-        failure_subcategory = failures.get("subcategory") if isinstance(failures.get("subcategory"), str) and failures.get("subcategory") else _failure_subcategory_from_metrics(metrics)
+        normalized_failures = _normalized_failure_info_from_metrics(metrics)
+        primary_category = normalized_failures.get("primary_category")
+        failure_subcategory = normalized_failures.get("subcategory")
         if isinstance(primary_category, str) and primary_category:
             failure_categories[primary_category] = failure_categories.get(primary_category, 0) + 1
             bucket = failure_category_breakdown.get(primary_category)
@@ -506,6 +612,9 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         sandbox_fallback_reason = testing.get("sandbox_fallback_reason")
         if isinstance(validation_strategy, str) and validation_strategy:
             validation_strategy_counts[validation_strategy] = validation_strategy_counts.get(validation_strategy, 0) + 1
+        create_pr_outcome = create_pr.get("outcome")
+        if isinstance(create_pr_outcome, str) and create_pr_outcome:
+            create_pr_outcomes[create_pr_outcome] = create_pr_outcomes.get(create_pr_outcome, 0) + 1
         if isinstance(stop_reason, str) and stop_reason:
             retry_policy_stop_reasons[stop_reason] = retry_policy_stop_reasons.get(stop_reason, 0) + 1
         if isinstance(sandbox_fallback_reason, str) and sandbox_fallback_reason:
@@ -670,7 +779,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         else None
     )
     strategy_comparison = _strategy_comparison_summary(strategy_stats)
-    latest_failures = latest_metrics.get("failures") if isinstance(latest_metrics.get("failures"), dict) else {}
+    latest_failures = _normalized_failure_info_from_metrics(latest_metrics)
     retry_stop_count = sum(retry_policy_stop_reasons.values())
     sandbox_fallback_count = sum(sandbox_fallback_reasons.values())
     return {
@@ -685,6 +794,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "primary_failure_categories": dict(sorted(failure_categories.items())),
         "primary_failure_subcategories": dict(sorted(failure_subcategories.items())),
         "validation_strategies": dict(sorted(validation_strategy_counts.items())),
+        "create_pr_outcomes": dict(sorted(create_pr_outcomes.items())),
         "effectiveness": {
             "retry_runs": retry_runs,
             "retry_recovered_runs": retry_recovered_runs,
@@ -743,7 +853,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
         "sandbox_fallback_reasons": dict(sorted(sandbox_fallback_reasons.items())),
         "dashboard": {
             "latest_failure_category": latest_failures.get("primary_category"),
-            "latest_failure_subcategory": latest_failures.get("subcategory") or _failure_subcategory_from_metrics(latest_metrics),
+            "latest_failure_subcategory": latest_failures.get("subcategory"),
             "dominant_failure_category": _top_key(failure_categories),
             "dominant_failure_subcategory": _top_key(failure_subcategories),
             "retry_stop_rate": round(retry_stop_count / comparable_run_count, 2) if comparable_run_count else 0.0,
@@ -834,15 +944,18 @@ def _diagnostics_summary_name(recent: int, status: str | None, failure_category:
 
 def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, Any]:
     workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
-    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    failures = _normalized_failure_info_from_metrics(metrics)
     testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    create_pr = metrics.get("create_pr") if isinstance(metrics.get("create_pr"), dict) else {}
     effectiveness = metrics.get("effectiveness") if isinstance(metrics.get("effectiveness"), dict) else {}
     return {
         "run_id": metrics.get("run_id") or "",
         "status": workflow.get("status") or "",
         "primary_failure": failures.get("primary_category") or "",
-        "failure_subcategory": failures.get("subcategory") or _failure_subcategory_from_metrics(metrics) or "",
+        "failure_subcategory": failures.get("subcategory") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "create_pr_outcome": create_pr.get("outcome") or "",
+        "create_pr_reason": create_pr.get("reason") or "",
         "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
         "skipped_command_count": testing.get("skipped_command_count") or 0,
         "command_reduction_rate": _as_float(testing.get("command_reduction_rate")),
@@ -874,10 +987,12 @@ def _phase_metrics(execution_events: list[dict[str, Any]], started_at: str, stat
         attempt = event.get("attempt") if isinstance(event.get("attempt"), int) else 1
         metrics = phase_metrics[node]
         if event_type == "node_started":
+            metrics["attempts"] = max(metrics["attempts"], attempt)
             if metrics["started_at"] is None:
                 metrics["started_at"] = event.get("timestamp") or started_at
             if current_timestamp is not None:
                 active_attempts[(node, attempt)] = current_timestamp
+            metrics["status"] = "in_progress"
             continue
 
         metrics["attempts"] = max(metrics["attempts"], attempt)
@@ -895,19 +1010,23 @@ def _phase_metrics(execution_events: list[dict[str, Any]], started_at: str, stat
         phase_metrics["test"]["status"] = "failed"
     elif phase_metrics["test"]["attempts"] > 0:
         phase_metrics["test"]["status"] = "passed"
-    if phase_metrics["create_pr"]["attempts"] > 0:
-        phase_metrics["create_pr"]["status"] = "completed"
-    if phase_metrics["review"]["attempts"] > 0:
+    if phase_metrics["create_pr"]["attempts"] > 0 and phase_metrics["create_pr"]["status"] != "in_progress":
+        create_pr_result = state.get("create_pr_result") if isinstance(state.get("create_pr_result"), dict) else {}
+        phase_metrics["create_pr"]["status"] = create_pr_result.get("outcome") or "completed"
+    if phase_metrics["review"]["attempts"] > 0 and phase_metrics["review"]["status"] != "in_progress":
         phase_metrics["review"]["status"] = "approved" if bool(state.get("review_approved", False)) else "changes_required"
-    if phase_metrics["code"]["attempts"] > 0:
+    if phase_metrics["code"]["attempts"] > 0 and phase_metrics["code"]["status"] != "in_progress":
         phase_metrics["code"]["status"] = "completed"
-    if phase_metrics["plan"]["attempts"] > 0:
+    if phase_metrics["plan"]["attempts"] > 0 and phase_metrics["plan"]["status"] != "in_progress":
         phase_metrics["plan"]["status"] = "completed"
 
     return phase_metrics
 
 
 def _workflow_status(state: dict[str, Any], review_summary: dict[str, Any]) -> str:
+    execution_events = [event for event in state.get("execution_events", []) if isinstance(event, dict)]
+    if _active_node(execution_events):
+        return "running"
     if bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)):
         return "approved"
     if review_summary.get("status") == "changes_required":
@@ -917,6 +1036,16 @@ def _workflow_status(state: dict[str, Any], review_summary: dict[str, Any]) -> s
     if state.get("test_passed") is False and state.get("test_results"):
         return "failed"
     return "aborted"
+
+
+def _active_node(execution_events: list[dict[str, Any]]) -> str | None:
+    if not execution_events:
+        return None
+    latest_event = execution_events[-1]
+    if latest_event.get("event_type") == "node_started":
+        node = latest_event.get("node")
+        return node if isinstance(node, str) and node else None
+    return None
 
 
 def _testing_status(state: dict[str, Any], test_signals: list[dict[str, Any]]) -> str:
@@ -1068,7 +1197,7 @@ def _primary_error_message(state: dict[str, Any], test_signals: list[dict[str, A
     error_message = state.get("error_message")
     if isinstance(error_message, str) and error_message.strip():
         return error_message
-    if not bool(state.get("test_passed", False)):
+    if (test_signals or state.get("test_results")) and not bool(state.get("test_passed", False)):
         return "Smoke tests failed."
     comments = state.get("review_comments")
     if isinstance(comments, list):
@@ -1161,9 +1290,10 @@ def _failure_subcategory_from_metrics(metrics: dict[str, Any]) -> str | None:
         return "blocked_edit_target"
     if primary_category == "validation":
         visual_review = testing.get("visual_review") if isinstance(testing.get("visual_review"), dict) else {}
-        if visual_review.get("screenshot_status") == "missing_artifacts":
+        screenshot_status = visual_review.get("screenshot_status")
+        if screenshot_status == "missing_artifacts":
             return "visual_review_missing_artifacts"
-        if _as_int(visual_review.get("missing_responsive_category_count")) > 0:
+        if screenshot_status == "passed" and _as_int(visual_review.get("missing_responsive_category_count")) > 0:
             return "visual_review_missing_responsive_coverage"
         if _as_int(visual_review.get("missing_state_count")) > 0:
             return "visual_review_missing_states"
@@ -1206,9 +1336,10 @@ def _sandbox_subcategory(state: dict[str, Any]) -> str:
 
 def _validation_subcategory(state: dict[str, Any], test_signals: list[dict[str, Any]], review_summary: dict[str, Any]) -> str:
     visual_review = review_summary.get("visual_review") if isinstance(review_summary.get("visual_review"), dict) else {}
-    if visual_review.get("screenshot_status") == "missing_artifacts":
+    screenshot_status = visual_review.get("screenshot_status")
+    if screenshot_status == "missing_artifacts":
         return "visual_review_missing_artifacts"
-    if _count_items(visual_review.get("missing_responsive_categories")) > 0:
+    if screenshot_status == "passed" and _count_items(visual_review.get("missing_responsive_categories")) > 0:
         return "visual_review_missing_responsive_coverage"
     if _count_items(visual_review.get("missing_states")) > 0:
         return "visual_review_missing_states"
@@ -1234,6 +1365,56 @@ def _looks_like_configuration_failure(error_message: str, test_results: str) -> 
 def _looks_like_sandbox_failure(error_message: str, test_results: str) -> bool:
     haystack = f"{error_message}\n{test_results}".lower()
     return any(token in haystack for token in ["sandbox", "docker", "container", "timed out"])
+
+
+def _normalized_failure_info_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    if failures.get("has_failure") is False:
+        return {"primary_category": None, "subcategory": None}
+    if workflow.get("status") == "approved":
+        return {"primary_category": None, "subcategory": None}
+    primary_category = failures.get("primary_category") if isinstance(failures.get("primary_category"), str) and failures.get("primary_category") else None
+    subcategory = failures.get("subcategory") if isinstance(failures.get("subcategory"), str) and failures.get("subcategory") else _failure_subcategory_from_metrics(metrics)
+    return {"primary_category": primary_category, "subcategory": subcategory}
+
+
+def _legacy_create_pr_from_metrics(metrics: dict[str, Any], execution_events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    created_pr_url = None
+    branch_name = None
+    provider = None
+    outcome = None
+    reason = None
+    base_branch = None
+    error = None
+    for event in execution_events:
+        if not isinstance(event, dict) or event.get("node") != "create_pr":
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        created_pr_url = details.get("created_pr_url") or created_pr_url
+        branch_name = details.get("branch_name") or branch_name
+        provider = details.get("issue_provider") or provider
+        outcome = details.get("outcome") or outcome
+        reason = details.get("reason") or reason
+        base_branch = details.get("base_branch") or base_branch
+        error = details.get("error") or error
+
+    workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+    if not outcome and created_pr_url:
+        outcome = "created" if workflow.get("created_pr") else "linked"
+        reason = "legacy_created_pr" if workflow.get("created_pr") else "legacy_linked_pr"
+    if not any([created_pr_url, branch_name, provider, outcome, reason, base_branch, error]):
+        return None
+    return {
+        "outcome": outcome,
+        "reason": reason,
+        "provider": provider,
+        "branch_name": branch_name,
+        "base_branch": base_branch,
+        "pr_url": created_pr_url,
+        "message": None,
+        "error": error,
+    }
 
 
 def _blocking_comment_count(review_comments: Any) -> int:
@@ -1310,6 +1491,28 @@ def _relative_workspace_path(workspace_dir: str, target: Path) -> str:
         return target.relative_to(Path(workspace_dir)).as_posix()
     except ValueError:
         return target.as_posix()
+
+
+def _metrics_artifact_sort_key(path: Path) -> tuple[int, float]:
+    run_id_timestamp = _parse_run_id_timestamp(path.parent.name)
+    if run_id_timestamp is not None:
+        return (1, run_id_timestamp.timestamp())
+    try:
+        return (0, path.stat().st_mtime)
+    except OSError:
+        return (0, 0.0)
+
+
+def _parse_run_id_timestamp(run_id: str) -> datetime | None:
+    if not isinstance(run_id, str):
+        return None
+    timestamp = run_id.split("-", 1)[0]
+    if not re.fullmatch(r"\d{8}T\d{6}Z", timestamp):
+        return None
+    try:
+        return datetime.strptime(timestamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _load_metrics_file(metrics_path: Path) -> dict[str, Any] | None:

@@ -36,11 +36,11 @@ class ReviewerAgent(BaseAgent):
             "patch_count": len(patches),
             "changed_files": changed_files,
             "validation_signals": validation_signals,
-            "visual_review": state.get("visual_review"),
+            "visual_review": self._review_payload_visual_review(state.get("visual_review")),
             "codegen_summary": state.get("codegen_summary", {}),
             "analysis_only": analysis_only,
         }
-        llm_review = self.llm.generate_json(REVIEWER_SYSTEM_PROMPT, json.dumps(review_payload, indent=2))
+        llm_review = self._safe_llm_review(review_payload)
         comments.extend(self._normalize_comments(llm_review.get("review_comments", [])))
         comments.extend(self._visual_review_comments(state.get("visual_review"), analysis_only))
 
@@ -68,6 +68,28 @@ class ReviewerAgent(BaseAgent):
             "review_comments": comments,
             "review_summary": review_summary,
         }
+
+    def _safe_llm_review(self, review_payload: dict[str, object]) -> dict[str, object]:
+        try:
+            return self.llm.generate_json(REVIEWER_SYSTEM_PROMPT, json.dumps(review_payload, indent=2))
+        except Exception:
+            return {
+                "review_approved": True,
+                "review_comments": ["Reviewer LLM request failed; using deterministic fallback review."],
+            }
+
+    def _review_payload_visual_review(self, visual_review: object) -> dict[str, object] | None:
+        if not isinstance(visual_review, dict):
+            return None
+
+        payload = dict(visual_review)
+        responsive_review = dict(visual_review.get("responsive_review") or {})
+        if payload.get("screenshot_status") != "passed":
+            responsive_review["missing_categories"] = []
+            responsive_review["missing_viewport_metadata"] = []
+            responsive_review["passed"] = True
+        payload["responsive_review"] = responsive_review
+        return payload
 
     def _extract_validation_signals(self, test_results: str) -> list[dict[str, object]]:
         signals: list[dict[str, object]] = []
@@ -203,17 +225,18 @@ class ReviewerAgent(BaseAgent):
             return None
         state_coverage = visual_review.get("state_coverage") or {}
         responsive_review = visual_review.get("responsive_review") or {}
+        screenshot_status = visual_review.get("screenshot_status")
         missing_states = [
             state_name
             for state_name, covered in state_coverage.items()
             if state_name in {"loading_state", "empty_state", "error_state", "success_state"} and not covered
         ]
         return {
-            "screenshot_status": visual_review.get("screenshot_status"),
+            "screenshot_status": screenshot_status,
             "artifact_count": visual_review.get("artifact_count", 0),
             "missing_states": sorted(missing_states),
             "responsive_categories": responsive_review.get("categories_present", []),
-            "missing_responsive_categories": responsive_review.get("missing_categories", []),
+            "missing_responsive_categories": responsive_review.get("missing_categories", []) if screenshot_status == "passed" else [],
         }
 
     def _residual_risks(

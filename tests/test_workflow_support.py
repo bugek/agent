@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ai_code_agent.config import AgentConfig
+from ai_code_agent.integrations.github_client import GitHubRequestError
 from ai_code_agent.integrations.workflow_support import build_branch_name, create_remote_pr, parse_issue_reference, resolve_issue_input
 
 
@@ -63,6 +64,7 @@ class WorkflowSupportTest(unittest.TestCase):
 
     def test_create_remote_pr_for_github_posts_issue_comment(self) -> None:
         client = Mock()
+        client.find_open_pull_request.return_value = None
         client.create_pull_request.return_value = "https://github.com/octo/repo/pull/9"
         state = {
             "issue_context": {"provider": "github", "repo": "octo/repo", "issue_number": 42, "title": "Fix flaky validation"},
@@ -73,16 +75,65 @@ class WorkflowSupportTest(unittest.TestCase):
             "review_summary": {"changed_areas": ["validation"]},
         }
 
-        pr_url, message = create_remote_pr(
+        result = create_remote_pr(
             state,
             AgentConfig(github_token="token", github_base_branch="main"),
             branch_name="ai-code-agent/gh-42-fix-flaky-validation",
             github_client=client,
         )
 
-        self.assertEqual(pr_url, "https://github.com/octo/repo/pull/9")
-        self.assertIn("GitHub PR", message)
+        self.assertEqual(result["pr_url"], "https://github.com/octo/repo/pull/9")
+        self.assertEqual(result["outcome"], "created")
+        self.assertIn("GitHub PR", result["message"])
         client.post_comment.assert_called_once()
+
+    def test_create_remote_pr_for_github_returns_existing_pr_when_open(self) -> None:
+        client = Mock()
+        client.find_open_pull_request.return_value = {"html_url": "https://github.com/octo/repo/pull/4"}
+        state = {
+            "issue_context": {"provider": "github", "repo": "octo/repo", "issue_number": 42, "title": "Fix flaky validation"},
+            "run_id": "run-123",
+            "patches": [{"file": "x"}],
+            "retry_count": 0,
+        }
+
+        result = create_remote_pr(
+            state,
+            AgentConfig(github_token="token", github_base_branch="main"),
+            branch_name="ai-code-agent/gh-42-fix-flaky-validation",
+            github_client=client,
+        )
+
+        self.assertEqual(result["outcome"], "existing")
+        self.assertEqual(result["reason"], "existing_open_pr")
+        self.assertEqual(result["pr_url"], "https://github.com/octo/repo/pull/4")
+        client.create_pull_request.assert_not_called()
+
+    def test_create_remote_pr_for_github_reports_http_failure(self) -> None:
+        client = Mock()
+        client.find_open_pull_request.return_value = None
+        client.create_pull_request.side_effect = GitHubRequestError(
+            422,
+            "Validation Failed",
+            payload={"errors": [{"message": "branch has no history in common"}]},
+        )
+        state = {
+            "issue_context": {"provider": "github", "repo": "octo/repo", "issue_number": 42, "title": "Fix flaky validation"},
+            "run_id": "run-123",
+            "patches": [{"file": "x"}],
+            "retry_count": 0,
+        }
+
+        result = create_remote_pr(
+            state,
+            AgentConfig(github_token="token", github_base_branch="main"),
+            branch_name="ai-code-agent/gh-42-fix-flaky-validation",
+            github_client=client,
+        )
+
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["reason"], "github_http_422")
+        self.assertIn("branch has no history in common", result["error"])
 
     def test_create_remote_pr_for_azure_comments_on_work_item(self) -> None:
         client = Mock()
@@ -101,7 +152,7 @@ class WorkflowSupportTest(unittest.TestCase):
             "retry_count": 0,
         }
 
-        pr_url, message = create_remote_pr(
+        result = create_remote_pr(
             state,
             AgentConfig(
                 azure_devops_pat="pat",
@@ -113,8 +164,9 @@ class WorkflowSupportTest(unittest.TestCase):
             azure_client=client,
         )
 
-        self.assertEqual(pr_url, "https://dev.azure.com/demo/project/_git/repo/pullrequest/5")
-        self.assertIn("Azure DevOps PR", message)
+        self.assertEqual(result["pr_url"], "https://dev.azure.com/demo/project/_git/repo/pullrequest/5")
+        self.assertEqual(result["outcome"], "created")
+        self.assertIn("Azure DevOps PR", result["message"])
         client.post_work_item_comment.assert_called_once()
 
 

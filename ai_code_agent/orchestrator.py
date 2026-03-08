@@ -158,12 +158,23 @@ def _finalize_result(state: AgentState, result: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _checkpoint_progress(state: AgentState) -> AgentState:
+    checkpointed = dict(state)
+    checkpointed["execution_metrics"] = build_execution_metrics(checkpointed)
+    checkpointed["execution_metrics_path"] = persist_execution_metrics(
+        checkpointed.get("workspace_dir"),
+        checkpointed.get("run_id"),
+        checkpointed["execution_metrics"],
+    )
+    return checkpointed
+
+
 def plan_node(state: AgentState) -> dict[str, Any]:
     """Invokes the Planner agent."""
     from ai_code_agent.agents.planner import PlannerAgent
 
     started = _start_node(state, "plan")
-    current_state = _event_state(state, started)
+    current_state = _checkpoint_progress(_event_state(state, started))
     config = AgentConfig()
     llm = LLMClient.from_config(config, role="planner")
     agent = PlannerAgent(config, llm)
@@ -190,7 +201,7 @@ def code_node(state: AgentState) -> dict[str, Any]:
     from ai_code_agent.agents.coder import CoderAgent
 
     started = _start_node(state, "code")
-    current_state = _event_state(state, started)
+    current_state = _checkpoint_progress(_event_state(state, started))
     config = AgentConfig()
     llm = LLMClient.from_config(config, role="coder")
     agent = CoderAgent(config, llm)
@@ -221,7 +232,7 @@ def test_node(state: AgentState) -> dict[str, Any]:
     from ai_code_agent.agents.tester import TesterAgent
 
     started = _start_node(state, "test")
-    current_state = _event_state(state, started)
+    current_state = _checkpoint_progress(_event_state(state, started))
     config = AgentConfig()
     llm = LLMClient.from_config(config, role="tester")
     agent = TesterAgent(config, llm)
@@ -252,7 +263,7 @@ def review_node(state: AgentState) -> dict[str, Any]:
     from ai_code_agent.agents.reviewer import ReviewerAgent
 
     started = _start_node(state, "review")
-    current_state = _event_state(state, started)
+    current_state = _checkpoint_progress(_event_state(state, started))
     config = AgentConfig()
     llm = LLMClient.from_config(config, role="reviewer")
     agent = ReviewerAgent(config, llm)
@@ -286,38 +297,88 @@ def review_node(state: AgentState) -> dict[str, Any]:
 def create_pr_node(state: AgentState) -> dict[str, Any]:
     """Creates a Pull Request with the changes."""
     started = _start_node(state, "create_pr")
-    current_state = _event_state(state, started)
+    current_state = _checkpoint_progress(_event_state(state, started))
     config, _ = _build_runtime()
     message = "Workflow completed without creating a PR."
     created_pr_url = None
     branch_name = None
+    create_pr_result: dict[str, Any] = {
+        "outcome": "skipped",
+        "reason": "auto_commit_disabled" if not config.auto_commit else "no_patches",
+        "provider": (current_state.get("issue_context") or {}).get("provider") if isinstance(current_state.get("issue_context"), dict) else None,
+        "branch_name": None,
+        "base_branch": None,
+        "pr_url": None,
+        "message": message,
+        "error": None,
+    }
 
     if config.auto_commit and current_state.get("patches"):
         from ai_code_agent.tools.git_ops import GitOps
 
         git_ops = GitOps(current_state["workspace_dir"])
+        issue_context = current_state.get("issue_context") if isinstance(current_state.get("issue_context"), dict) else {}
         branch_name = build_branch_name(
-            current_state.get("issue_context") if isinstance(current_state.get("issue_context"), dict) else {},
+            issue_context,
             current_state.get("issue_description") or datetime.utcnow().strftime('%Y%m%d%H%M%S'),
         )
-        if git_ops.create_branch(branch_name) and git_ops.commit_changes("AI Code Agent automated update"):
-            message = f"Committed changes on branch {branch_name}."
-            if config.auto_push and git_ops.push_branch(branch_name):
-                created_pr_url, message = create_remote_pr(current_state, config, branch_name=branch_name)
+        create_pr_result.update({"branch_name": branch_name, "provider": issue_context.get("provider")})
+        if not git_ops.is_repository():
+            message = "Workflow completed, but skipped git/PR automation because the workspace is not a git repository."
+            create_pr_result.update({"outcome": "skipped", "reason": "non_git_workspace"})
+        elif git_ops.create_branch(branch_name):
+            committed = True
+            if git_ops.has_pending_changes():
+                committed = git_ops.commit_changes("AI Code Agent automated update")
+                if committed:
+                    message = f"Committed changes on branch {branch_name}."
+                else:
+                    create_pr_result.update({"outcome": "failed", "reason": "commit_failed"})
+            else:
+                message = f"Using existing branch {branch_name} with no new local changes to commit."
+
+            if committed and config.auto_push:
+                provider = issue_context.get("provider")
+                base_branch = getattr(config, "github_base_branch", "main") if provider == "github" else getattr(config, "azure_devops_target_branch", "main") if provider == "azure_devops" else None
+                create_pr_result["base_branch"] = base_branch
+                if base_branch and not git_ops.ensure_remote_base_branch(base_branch):
+                    message = f"Prepared branch {branch_name}, but failed to bootstrap remote base branch {base_branch}."
+                    create_pr_result.update({"outcome": "failed", "reason": "base_branch_bootstrap_failed"})
+                elif git_ops.push_branch(branch_name):
+                    create_pr_result = create_remote_pr(current_state, config, branch_name=branch_name)
+                    created_pr_url = create_pr_result.get("pr_url") if isinstance(create_pr_result.get("pr_url"), str) else None
+                    message = create_pr_result.get("message") or message
+                else:
+                    message = f"Prepared branch {branch_name}, but automatic push failed."
+                    create_pr_result.update({"outcome": "failed", "reason": "push_failed"})
+            elif committed and not config.auto_push:
+                message = f"Committed changes on branch {branch_name}, but automatic push is disabled."
+                create_pr_result.update({"outcome": "skipped", "reason": "auto_push_disabled"})
+            elif not committed:
+                message = "Workflow completed, but automatic git commit failed."
         else:
-            message = "Workflow completed, but automatic git commit failed."
+            message = "Workflow completed, but automatic branch preparation failed."
+            create_pr_result.update({"outcome": "failed", "reason": "branch_preparation_failed"})
+
+    create_pr_result["message"] = message
+    create_pr_result["pr_url"] = created_pr_url
 
     result = {
         "created_pr_url": created_pr_url,
+        "create_pr_result": create_pr_result,
         "execution_log": _merge_logs(current_state, message),
         "execution_events": _append_event(
-            _event_state(current_state, {"created_pr_url": created_pr_url}),
+            _event_state(current_state, {"created_pr_url": created_pr_url, "create_pr_result": create_pr_result}),
             "create_pr",
             "completed",
             {
                 "created_pr_url": created_pr_url,
                 "branch_name": branch_name,
                 "issue_provider": (current_state.get("issue_context") or {}).get("provider") if isinstance(current_state.get("issue_context"), dict) else None,
+                "outcome": create_pr_result.get("outcome"),
+                "reason": create_pr_result.get("reason"),
+                "base_branch": create_pr_result.get("base_branch"),
+                "error": create_pr_result.get("error"),
             },
         ),
         "error_message": current_state.get("error_message"),

@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from ai_code_agent.config import AgentConfig
-from ai_code_agent.main import parse_args, run_diagnostics
+from ai_code_agent.main import parse_args, run_diagnostics, run_health_check, run_normalize_metrics
 from ai_code_agent.metrics import build_diagnostics_summary, persist_diagnostics_summary, persist_execution_metrics
 
 
@@ -39,6 +39,21 @@ class MainCliTest(unittest.TestCase):
         self.assertEqual(args.format, "text")
         self.assertTrue(args.json)
 
+    def test_parse_args_supports_normalize_metrics_command(self) -> None:
+        args = parse_args([
+            "normalize-metrics",
+            "--repo",
+            "workspace",
+            "--run-id",
+            "run-123",
+            "--json",
+        ])
+
+        self.assertEqual(args.command, "normalize-metrics")
+        self.assertEqual(args.repo, "workspace")
+        self.assertEqual(args.run_id, "run-123")
+        self.assertTrue(args.json)
+
     def test_run_diagnostics_prints_latest_metrics_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             metrics = {
@@ -55,6 +70,7 @@ class MainCliTest(unittest.TestCase):
                     "command_reduction_rate": 0.67,
                     "slowest_command": {"label": "script:build", "duration_ms": 980, "exit_code": 1, "timed_out": False},
                 },
+                "create_pr": {"outcome": "failed", "reason": "github_http_422", "error": "branch has no history in common"},
                 "review": {"status": "changes_required", "residual_risk_count": 2},
                 "effectiveness": {"retry_attempted": True, "retry_recovered": False, "remediation_applied": True},
             }
@@ -79,6 +95,9 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Command reduction rate: 0.67", rendered)
             self.assertIn("Slowest command: script:build (980 ms)", rendered)
             self.assertIn("Testing duration ms: 1100", rendered)
+            self.assertIn("Create PR outcome: failed", rendered)
+            self.assertIn("Create PR reason: github_http_422", rendered)
+            self.assertIn("Create PR error: branch has no history in common", rendered)
 
     def test_run_diagnostics_prints_json_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -91,6 +110,82 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(json.loads(output.getvalue()), metrics)
+
+    def test_run_normalize_metrics_prints_json_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-123",
+                "workflow": {"status": "approved", "created_pr": True, "linked_pr": False},
+                "failures": {
+                    "has_failure": True,
+                    "primary_category": "unknown",
+                    "subcategory": "unknown_failure",
+                    "categories": ["unknown"],
+                    "taxonomy": {"category": "unknown", "subcategory": "unknown_failure"},
+                },
+                "execution_events": [
+                    {
+                        "node": "create_pr",
+                        "details": {
+                            "created_pr_url": "https://example.test/pr/1",
+                            "issue_provider": "github",
+                        },
+                    }
+                ],
+            }
+            persist_execution_metrics(temp_dir, "run-123", metrics)
+            summary = build_diagnostics_summary(
+                [(metrics, ".ai-code-agent/runs/run-123/metrics.json")],
+                {"run_count": 1},
+                recent=5,
+                filters={"status": None, "failure_category": None},
+            )
+            persist_diagnostics_summary(temp_dir, summary, recent=5, status=None, failure_category=None)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_normalize_metrics(AgentConfig(workspace_dir=temp_dir), None, None, True)
+
+            self.assertEqual(exit_code, 0)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["checked"], 1)
+            self.assertEqual(report["updated"], 1)
+            self.assertEqual(report["diagnostics_removed"], 1)
+            self.assertEqual(report["workspace_dir"], temp_dir)
+            self.assertIsNone(report["run_id"])
+
+    def test_run_health_check_includes_sandbox_status(self) -> None:
+        output = io.StringIO()
+        fake_llm = type(
+            "FakeLLM",
+            (),
+            {"health_check": lambda self: {"provider": "openrouter", "model": "openai/gpt-5.4", "enabled": True, "live_call": True, "ok": True, "message": "OK"}},
+        )()
+        sandbox_report = {
+            "requested_mode": "auto",
+            "resolved_mode": "local",
+            "started": True,
+            "fallback_reason": "docker_image_missing",
+            "docker_available": True,
+            "image_available": False,
+            "image": "demo-image",
+            "docker_sandbox_ready": False,
+            "degraded": True,
+            "recommendation": "Build the sandbox image with: docker build -t demo-image .",
+        }
+
+        with patch("ai_code_agent.main.LLMClient.from_config", return_value=fake_llm), patch(
+            "ai_code_agent.main.SandboxRunner.probe", return_value=sandbox_report
+        ), redirect_stdout(output):
+            exit_code = run_health_check(AgentConfig(workspace_dir="."), "coder", False)
+
+        self.assertEqual(exit_code, 0)
+        rendered = output.getvalue()
+        self.assertIn("Sandbox requested mode: auto", rendered)
+        self.assertIn("Sandbox resolved mode: local", rendered)
+        self.assertIn("Sandbox fallback reason: docker_image_missing", rendered)
+        self.assertIn("Sandbox recommendation: Build the sandbox image with: docker build -t demo-image .", rendered)
 
     def test_run_diagnostics_prints_recent_run_trend(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -108,6 +203,7 @@ class MainCliTest(unittest.TestCase):
                     "slowest_command": None,
                     "commands": [{"label": "compileall", "duration_ms": 40}],
                 },
+                "create_pr": {"outcome": "created", "reason": "opened_github_pr"},
                 "review": {"status": "approved", "residual_risk_count": 0},
                 "effectiveness": {"retry_recovered": False},
             }
@@ -125,6 +221,7 @@ class MainCliTest(unittest.TestCase):
                     "slowest_command": {"label": "script:lint", "duration_ms": 60},
                     "commands": [{"label": "script:lint", "duration_ms": 60}, {"label": "compileall", "duration_ms": 20}],
                 },
+                "create_pr": {"outcome": "existing", "reason": "existing_open_pr"},
                 "review": {"status": "approved", "residual_risk_count": 1},
                 "planning": {"edit_intent_count": 1},
                 "coding": {"remediation_applied": True},
@@ -144,6 +241,7 @@ class MainCliTest(unittest.TestCase):
                     "slowest_command": {"label": "script:test", "duration_ms": 150},
                     "commands": [{"label": "script:test", "duration_ms": 150}, {"label": "compileall", "duration_ms": 50}],
                 },
+                "create_pr": {"outcome": "failed", "reason": "github_http_422"},
                 "review": {"status": "changes_required", "residual_risk_count": 2},
                 "planning": {"edit_intent_count": 1},
                 "coding": {"remediation_applied": True},
@@ -172,16 +270,17 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Average duration ms: 200", rendered)
             self.assertIn("Average testing duration ms: 106", rendered)
             self.assertIn("Validation strategies: full=2, targeted_retry=1", rendered)
+            self.assertIn("Create PR outcomes: created=1, existing=1, failed=1", rendered)
             self.assertIn("Retry recovery: 0/1 (0.00)", rendered)
             self.assertIn("Remediation recovery: 1/2 (0.50)", rendered)
             self.assertIn("Edit intent recovery: 1/2 (0.50)", rendered)
             self.assertIn("Targeted retry savings: runs=1, approved=0, success_rate=0.00, skipped_commands=3, avg_skipped=3, avg_reduction_rate=0.60", rendered)
             self.assertIn("Strategy comparison: full(runs=2, success_rate=1.00, avg_testing_ms=60) ; targeted_retry(runs=1, success_rate=0.00, avg_testing_ms=200) ; delta(success_rate=-1.00, testing_ms=140, reduction_rate=0.60)", rendered)
-            self.assertIn("Primary failure categories: generation=1, validation=1", rendered)
-            self.assertIn("Failure subcategories: command:script:test=1, generation_failure=1", rendered)
-            self.assertIn("Failure breakdown: generation(runs=1; commands=none; nodes=review=1); validation(runs=1; commands=script:test=1; nodes=test=1)", rendered)
-            self.assertIn("Failure subcategory breakdown: command:script:test(runs=1; categories=validation=1); generation_failure(runs=1; categories=generation=1)", rendered)
-            self.assertIn("Dashboard summary: latest_failure=validation/command:script:test, dominant_failure=validation/generation_failure, retry_stop_rate=0.00, sandbox_fallback_rate=0.00", rendered)
+            self.assertIn("Primary failure categories: validation=1", rendered)
+            self.assertIn("Failure subcategories: command:script:test=1", rendered)
+            self.assertIn("Failure breakdown: validation(runs=1; commands=script:test=1; nodes=test=1)", rendered)
+            self.assertIn("Failure subcategory breakdown: command:script:test(runs=1; categories=validation=1)", rendered)
+            self.assertIn("Dashboard summary: latest_failure=validation/command:script:test, dominant_failure=validation/command:script:test, retry_stop_rate=0.00, sandbox_fallback_rate=0.00", rendered)
             self.assertIn("Top terminal nodes: review=2, test=1", rendered)
             self.assertIn("Top failing commands: script:test=1", rendered)
             self.assertIn("Top slowest commands: script:test avg=150 max=150 count=1, script:lint avg=60 max=60 count=1, compileall avg=36 max=50 count=3", rendered)
@@ -291,14 +390,13 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry"]["average_command_reduction_rate"], 0.6)
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry_vs_full"]["success_rate_delta"], -1.0)
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry_vs_full"]["testing_duration_ms_delta"], 140)
-            self.assertEqual(payload["trend"]["primary_failure_subcategories"], {"command:script:test": 1, "generation_failure": 1})
-            self.assertEqual(payload["trend"]["failure_category_breakdown"]["generation"]["run_count"], 1)
+            self.assertEqual(payload["trend"]["primary_failure_subcategories"], {"command:script:test": 1})
+            self.assertEqual(payload["trend"]["failure_category_breakdown"]["validation"]["run_count"], 1)
             self.assertEqual(payload["trend"]["failure_subcategory_breakdown"]["command:script:test"]["primary_categories"][0], {"category": "validation", "count": 1})
-            self.assertEqual(payload["trend"]["failure_category_breakdown"]["generation"]["terminal_nodes"][0], {"node": "review", "count": 1})
             self.assertEqual(payload["trend"]["failure_category_breakdown"]["validation"]["failing_commands"][0], {"label": "script:test", "count": 1})
             self.assertEqual(payload["trend"]["dashboard"]["latest_failure_subcategory"], "command:script:test")
             self.assertEqual(payload["trend"]["dashboard"]["dominant_failure_category"], "validation")
-            self.assertEqual(payload["trend"]["dashboard"]["dominant_failure_subcategory"], "generation_failure")
+            self.assertEqual(payload["trend"]["dashboard"]["dominant_failure_subcategory"], "command:script:test")
             self.assertEqual(payload["trend"]["top_terminal_nodes"][0], {"node": "review", "count": 2})
             self.assertEqual(payload["trend"]["top_terminal_nodes"][1], {"node": "test", "count": 1})
             self.assertEqual(payload["trend"]["top_failing_commands"][0], {"label": "script:test", "count": 1})
@@ -336,6 +434,7 @@ class MainCliTest(unittest.TestCase):
                     "slowest_command": None,
                     "commands": [],
                 },
+                "create_pr": {"outcome": "existing", "reason": "existing_open_pr"},
                 "review": {"status": "approved", "residual_risk_count": 0},
                 "effectiveness": {"retry_recovered": True},
             }
@@ -347,8 +446,65 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
-            self.assertIn("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath", rendered)
-            self.assertIn("run-rows\tapproved\t\t\ttargeted_retry\tTrue\t2\t0.5\t150\t50\treview\t.ai-code-agent/runs/run-rows/metrics.json", rendered)
+            self.assertIn("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath", rendered)
+            self.assertIn("run-rows\tapproved\t\t\ttargeted_retry\texisting\texisting_open_pr\tTrue\t2\t0.5\t150\t50\treview\t.ai-code-agent/runs/run-rows/metrics.json", rendered)
+
+    def test_run_diagnostics_summary_uses_none_failure_for_latest_approved_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            approved_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-approved",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 110, "terminal_node": "create_pr"},
+                "failures": {"has_failure": False, "primary_category": None, "subcategory": None},
+                "testing": {"failed_commands": [], "total_duration_ms": 40, "validation_strategy": "full", "slowest_command": None},
+                "create_pr": {"outcome": "existing", "reason": "existing_open_pr", "pr_url": "https://github.com/octo/repo/pull/1"},
+                "review": {"status": "approved", "residual_risk_count": 0},
+                "effectiveness": {"retry_recovered": False},
+            }
+            failed_metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-failed",
+                "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 150, "terminal_node": "test"},
+                "failures": {"has_failure": True, "primary_category": "validation", "subcategory": "command:script:test"},
+                "testing": {"failed_commands": ["script:test"], "total_duration_ms": 70, "validation_strategy": "full", "slowest_command": None},
+                "review": {"status": "changes_required", "residual_risk_count": 1},
+                "effectiveness": {"retry_recovered": False},
+            }
+            persist_execution_metrics(temp_dir, "run-failed", failed_metrics)
+            persist_execution_metrics(temp_dir, "run-approved", approved_metrics)
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-failed", "metrics.json"), (100, 100))
+            os.utime(os.path.join(temp_dir, ".ai-code-agent", "runs", "run-approved", "metrics.json"), (200, 200))
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, None, 2, None, None, "text")
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("Dashboard summary: latest_failure=none/none", rendered)
+            self.assertIn("Create PR outcome: existing", rendered)
+
+    def test_run_diagnostics_hides_legacy_unknown_failure_for_approved_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "run-legacy-approved",
+                "workflow": {"status": "approved", "attempt_count": 1, "duration_ms": 100, "terminal_node": "create_pr"},
+                "failures": {"has_failure": False, "primary_category": "unknown", "subcategory": "unknown_failure"},
+                "testing": {"failed_commands": [], "total_duration_ms": 50, "validation_strategy": "full", "slowest_command": None},
+                "review": {"status": "approved", "residual_risk_count": 0},
+                "create_pr": {"outcome": "existing", "reason": "existing_open_pr"},
+            }
+            persist_execution_metrics(temp_dir, "run-legacy-approved", metrics)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                exit_code = run_diagnostics(AgentConfig(workspace_dir=temp_dir), None, "run-legacy-approved", 5, None, None, "text")
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertNotIn("Primary failure category:", rendered)
+            self.assertNotIn("Failure subcategory:", rendered)
 
     def test_run_diagnostics_skips_aborted_runs_in_comparison_baselines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -540,6 +696,7 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-1",
                 "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 100, "terminal_node": "test"},
                 "failures": {"primary_category": "validation"},
+                "create_pr": {"outcome": "failed", "reason": "push_failed"},
                 "testing": {"failed_commands": ["compileall"], "total_duration_ms": 70, "slowest_command": None},
                 "review": {"status": "changes_required", "residual_risk_count": 1},
             }
@@ -552,8 +709,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\t\tfull\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\t\tfull\tfailed\tpush_failed\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_supports_ndjson_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -598,6 +755,7 @@ class MainCliTest(unittest.TestCase):
                 "run_id": "run-1",
                 "workflow": {"status": "failed", "attempt_count": 1, "duration_ms": 100, "terminal_node": "test"},
                 "failures": {"primary_category": "validation"},
+                "create_pr": {"outcome": "failed", "reason": "push_failed"},
                 "testing": {"failed_commands": ["compileall"], "total_duration_ms": 70, "slowest_command": None},
                 "review": {"status": "changes_required", "residual_risk_count": 1},
             }
@@ -627,8 +785,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\tcommand:compileall\tfull\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\tcommand:compileall\tfull\tfailed\tpush_failed\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_reuses_fresh_summary_snapshot_for_json_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

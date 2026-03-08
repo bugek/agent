@@ -11,10 +11,12 @@ from ai_code_agent.metrics import (
     list_execution_metrics_artifacts,
     load_fresh_diagnostics_summary_artifact,
     load_execution_metrics_artifact,
+    normalize_execution_metrics_artifacts,
     persist_diagnostics_summary,
     utc_now_iso,
 )
 from ai_code_agent.orchestrator import build_graph, AgentState
+from ai_code_agent.tools.sandbox import SandboxRunner
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -39,6 +41,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     diagnose_parser.add_argument("--format", choices=["text", "json", "ndjson", "rows"], default="text", help="Output format for diagnostics export")
     diagnose_parser.add_argument("--json", action="store_true", help="Print the metrics artifact as JSON")
 
+    normalize_parser = subparsers.add_parser("normalize-metrics", help="Rewrite persisted execution metrics artifacts to the latest normalized semantics")
+    normalize_parser.add_argument("--repo", type=str, required=False, help="Local path to the repository workspace")
+    normalize_parser.add_argument("--run-id", type=str, required=False, help="Specific run id to normalize")
+    normalize_parser.add_argument("--json", action="store_true", help="Print the normalization report as JSON")
+
     if not arguments or arguments[0].startswith("-"):
         arguments = ["run", *arguments]
     return parser.parse_args(arguments)
@@ -48,6 +55,8 @@ def run_health_check(config: AgentConfig, role: str | None, as_json: bool) -> in
     llm = LLMClient.from_config(config, role=role)
     report = llm.health_check()
     report["role"] = role or "default"
+    sandbox = SandboxRunner(config.docker_image, workspace_dir=config.workspace_dir, mode=config.sandbox_mode).probe()
+    report["sandbox"] = sandbox
 
     if as_json:
         print(json.dumps(report, indent=2, ensure_ascii=True))
@@ -59,6 +68,14 @@ def run_health_check(config: AgentConfig, role: str | None, as_json: bool) -> in
         print(f"Live call attempted: {report['live_call']}")
         print(f"OK: {report['ok']}")
         print(f"Message: {report['message']}")
+        print(f"Sandbox requested mode: {sandbox['requested_mode']}")
+        print(f"Sandbox resolved mode: {sandbox['resolved_mode']}")
+        print(f"Sandbox image: {sandbox['image']}")
+        print(f"Sandbox degraded: {sandbox['degraded']}")
+        if sandbox.get("fallback_reason"):
+            print(f"Sandbox fallback reason: {sandbox['fallback_reason']}")
+        if sandbox.get("recommendation"):
+            print(f"Sandbox recommendation: {sandbox['recommendation']}")
 
     return 0 if report["ok"] else 1
 
@@ -188,6 +205,22 @@ def run_diagnostics(
     return 0
 
 
+def run_normalize_metrics(config: AgentConfig, repo: str | None, run_id: str | None, as_json: bool) -> int:
+    workspace_dir = repo or config.workspace_dir
+    report = normalize_execution_metrics_artifacts(workspace_dir, run_id)
+    report.update({"workspace_dir": workspace_dir, "run_id": run_id})
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=True))
+    else:
+        print(f"Workspace: {workspace_dir}")
+        if run_id:
+            print(f"Run ID: {run_id}")
+        print(f"Artifacts checked: {report['checked']}")
+        print(f"Artifacts updated: {report['updated']}")
+        print(f"Diagnostics summaries removed: {report['diagnostics_removed']}")
+    return 0
+
+
 def _print_summary_text_output(
     *,
     latest_metrics: dict,
@@ -225,6 +258,11 @@ def _print_summary_text_output(
         print(
             "Validation strategies: "
             + ", ".join(f"{name}={count}" for name, count in trend["validation_strategies"].items())
+        )
+    if trend.get("create_pr_outcomes"):
+        print(
+            "Create PR outcomes: "
+            + ", ".join(f"{name}={count}" for name, count in trend["create_pr_outcomes"].items())
         )
     effectiveness = trend.get("effectiveness") if isinstance(trend.get("effectiveness"), dict) else {}
     if effectiveness:
@@ -385,7 +423,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
             print(json.dumps(row, ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -398,6 +436,8 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
                         "primary_failure",
                         "failure_subcategory",
                         "validation_strategy",
+                        "create_pr_outcome",
+                        "create_pr_reason",
                         "retry_recovered",
                         "skipped_command_count",
                         "command_reduction_rate",
@@ -430,9 +470,10 @@ def _load_metrics_entries_from_summary(workspace_dir: str | None, summary: dict)
 
 def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     workflow = metrics.get("workflow") or {}
-    failures = metrics.get("failures") or {}
+    failures = _display_failure_info(metrics)
     testing = metrics.get("testing") or {}
     review = metrics.get("review") or {}
+    create_pr = metrics.get("create_pr") or {}
     effectiveness = metrics.get("effectiveness") or {}
     print(f"Run ID: {metrics.get('run_id') or '<unknown>'}")
     print(f"Metrics artifact: {metrics_path}")
@@ -470,6 +511,14 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     total_duration_ms = testing.get("total_duration_ms")
     if isinstance(total_duration_ms, int):
         print(f"Testing duration ms: {total_duration_ms}")
+    if create_pr.get("outcome"):
+        print(f"Create PR outcome: {create_pr.get('outcome')}")
+    if create_pr.get("reason"):
+        print(f"Create PR reason: {create_pr.get('reason')}")
+    if create_pr.get("pr_url"):
+        print(f"PR URL: {create_pr.get('pr_url')}")
+    elif create_pr.get("error"):
+        print(f"Create PR error: {create_pr.get('error')}")
     print(f"Review status: {review.get('status')}")
     print(f"Residual risks: {review.get('residual_risk_count')}")
 
@@ -529,7 +578,7 @@ def _print_export_output(
             print(json.dumps(_diagnostics_row(metrics, path), ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for metrics, path in metrics_entries:
             row = _diagnostics_row(metrics, path)
             print(
@@ -541,6 +590,8 @@ def _print_export_output(
                         "primary_failure",
                         "failure_subcategory",
                         "validation_strategy",
+                        "create_pr_outcome",
+                        "create_pr_reason",
                         "retry_recovered",
                         "skipped_command_count",
                         "command_reduction_rate",
@@ -557,8 +608,9 @@ def _print_export_output(
 
 def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
     workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
-    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    failures = _display_failure_info(metrics)
     testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    create_pr = metrics.get("create_pr") if isinstance(metrics.get("create_pr"), dict) else {}
     effectiveness = metrics.get("effectiveness") if isinstance(metrics.get("effectiveness"), dict) else {}
     return {
         "run_id": metrics.get("run_id") or "",
@@ -566,6 +618,8 @@ def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
         "primary_failure": failures.get("primary_category") or "",
         "failure_subcategory": failures.get("subcategory") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "create_pr_outcome": create_pr.get("outcome") or "",
+        "create_pr_reason": create_pr.get("reason") or "",
         "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
         "skipped_command_count": testing.get("skipped_command_count") or 0,
         "command_reduction_rate": testing.get("command_reduction_rate") or 0.0,
@@ -574,6 +628,14 @@ def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
         "terminal_node": workflow.get("terminal_node") or "",
         "path": path,
     }
+
+
+def _display_failure_info(metrics: dict) -> dict[str, object]:
+    workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
+    failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
+    if failures.get("has_failure") is False or workflow.get("status") == "approved":
+        return {"primary_category": None, "subcategory": None}
+    return failures
 
 
 def cli(argv: list[str] | None = None):
@@ -594,6 +656,13 @@ def cli(argv: list[str] | None = None):
             getattr(args, "status", None),
             getattr(args, "failure_category", None),
             output_format,
+        )
+    if args.command == "normalize-metrics":
+        return run_normalize_metrics(
+            config,
+            getattr(args, "repo", None),
+            getattr(args, "run_id", None),
+            getattr(args, "json", False),
         )
 
     resolved_issue_description, issue_context = resolve_issue_input(args.issue, config)
