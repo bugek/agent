@@ -259,6 +259,24 @@ class TestTesterVisualReview(unittest.TestCase):
             self.assertTrue(visual_review["state_coverage"]["error_state"])
             self.assertTrue(visual_review["state_coverage"]["success_state"])
 
+    def test_build_visual_review_marks_component_only_change_as_not_requiring_route_state_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "components").mkdir(parents=True)
+            (temp_path / "components/smartfarm-header.tsx").write_text("export function SmartFarmHeader() { return null; }", encoding="utf-8")
+
+            state = {
+                "workspace_dir": temp_dir,
+                "patches": [{"file": "components/smartfarm-header.tsx"}],
+                "planning_context": {},
+            }
+            workspace_profile = {"nextjs": {"router_type": "app"}}
+
+            visual_review = self.agent._build_visual_review(state, workspace_profile, [])
+
+            self.assertFalse(visual_review["requires_route_state_coverage"])
+            self.assertEqual(visual_review["route_files"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

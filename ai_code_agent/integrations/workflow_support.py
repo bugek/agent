@@ -299,9 +299,9 @@ def build_pr_body(state: dict[str, Any], branch_name: str) -> str:
         f"- Patches generated: {len(state.get('patches', []))}",
         f"- Retry count: {state.get('retry_count', 0)}",
     ]
-    plan = normalize_text(state.get("plan") or "")
-    if plan:
-        lines.extend(["", "## Plan", plan[:1200]])
+    plan_lines = _format_markdown_plan(state.get("plan") or "")
+    if plan_lines:
+        lines.extend(["", "## Plan", *plan_lines])
     changed_areas = review_summary.get("changed_areas") if isinstance(review_summary.get("changed_areas"), list) else []
     if changed_areas:
         lines.extend(["", "## Changed Areas"])
@@ -309,6 +309,36 @@ def build_pr_body(state: dict[str, Any], branch_name: str) -> str:
     if remediation.get("required"):
         lines.extend(["", "## Residual Remediation", "- Reviewer still flagged follow-up work."])
     return "\n".join(lines)
+
+
+def _format_markdown_plan(value: str) -> list[str]:
+    text = unescape(str(value or "")).replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    raw_lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n")]
+    lines = [line for line in raw_lines if line]
+    if not lines:
+        return []
+
+    if len(lines) == 1 and " - " in lines[0]:
+        segments = [segment.strip() for segment in lines[0].split(" - ") if segment.strip()]
+        if len(segments) > 1:
+            lines = segments
+
+    formatted: list[str] = []
+    for line in lines[:12]:
+        bullet_match = re.match(r"^[-*•]\s+(.*)$", line)
+        numbered_match = re.match(r"^(\d+)\.\s+(.*)$", line)
+        if bullet_match:
+            formatted.append(f"- {bullet_match.group(1).strip()}")
+        elif numbered_match:
+            formatted.append(f"{numbered_match.group(1)}. {numbered_match.group(2).strip()}")
+        elif len(lines) > 1:
+            formatted.append(f"- {line}")
+        else:
+            formatted.append(line[:1200])
+    return formatted
 
 
 def normalize_text(value: str) -> str:

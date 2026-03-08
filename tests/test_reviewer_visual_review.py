@@ -126,6 +126,29 @@ class TestReviewerVisualReview(unittest.TestCase):
 
         self.assertIn("Frontend visual review is missing responsive viewport coverage for: mobile.", comments)
 
+    def test_visual_review_component_only_change_has_no_route_state_blockers(self) -> None:
+        visual_review = {
+            "enabled": True,
+            "requires_route_state_coverage": False,
+            "state_coverage": {
+                "loading_file": False,
+                "error_file": False,
+                "loading_state": False,
+                "empty_state": False,
+                "error_state": False,
+                "success_state": False,
+            },
+            "screenshot_status": "not_configured",
+            "responsive_review": {"missing_categories": [], "missing_viewport_metadata": []},
+        }
+
+        self.assertFalse(self.agent._visual_review_has_blockers(visual_review))
+        comments = self.agent._visual_review_comments(visual_review, analysis_only=False)
+        self.assertNotIn("Frontend visual review is missing component states: empty_state, error_state, loading_state, success_state.", comments)
+        self.assertNotIn("Frontend visual review did not find a loading.tsx/loading.ts companion file for the changed route.", comments)
+        self.assertNotIn("Frontend visual review did not find an error.tsx/error.ts companion file for the changed route.", comments)
+        self.assertIn("Frontend screenshot review is not configured; relying on structural visual checks only.", comments)
+
 
 if __name__ == "__main__":
     unittest.main()

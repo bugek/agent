@@ -112,19 +112,21 @@ class ReviewerAgent(BaseAgent):
             return []
 
         state_coverage = visual_review.get("state_coverage") or {}
+        requires_route_state_coverage = bool(visual_review.get("requires_route_state_coverage", True))
         comments: list[str] = []
-        missing_states = [
-            state_name
-            for state_name, covered in state_coverage.items()
-            if state_name in {"loading_state", "empty_state", "error_state", "success_state"} and not covered
-        ]
-        if missing_states:
-            comments.append(f"Frontend visual review is missing component states: {', '.join(sorted(missing_states))}.")
+        if requires_route_state_coverage:
+            missing_states = [
+                state_name
+                for state_name, covered in state_coverage.items()
+                if state_name in {"loading_state", "empty_state", "error_state", "success_state"} and not covered
+            ]
+            if missing_states:
+                comments.append(f"Frontend visual review is missing component states: {', '.join(sorted(missing_states))}.")
 
-        if not state_coverage.get("loading_file"):
-            comments.append("Frontend visual review did not find a loading.tsx/loading.ts companion file for the changed route.")
-        if not state_coverage.get("error_file"):
-            comments.append("Frontend visual review did not find an error.tsx/error.ts companion file for the changed route.")
+            if not state_coverage.get("loading_file"):
+                comments.append("Frontend visual review did not find a loading.tsx/loading.ts companion file for the changed route.")
+            if not state_coverage.get("error_file"):
+                comments.append("Frontend visual review did not find an error.tsx/error.ts companion file for the changed route.")
 
         screenshot_status = visual_review.get("screenshot_status")
         if screenshot_status == "failed":
@@ -151,8 +153,9 @@ class ReviewerAgent(BaseAgent):
         if not isinstance(visual_review, dict) or not visual_review.get("enabled"):
             return False
         state_coverage = visual_review.get("state_coverage") or {}
+        requires_route_state_coverage = bool(visual_review.get("requires_route_state_coverage", True))
         required_flags = ["loading_state", "empty_state", "error_state", "success_state", "loading_file", "error_file"]
-        if any(not state_coverage.get(flag) for flag in required_flags):
+        if requires_route_state_coverage and any(not state_coverage.get(flag) for flag in required_flags):
             return True
         responsive_review = visual_review.get("responsive_review") or {}
         if visual_review.get("screenshot_status") == "passed":
@@ -226,14 +229,18 @@ class ReviewerAgent(BaseAgent):
         state_coverage = visual_review.get("state_coverage") or {}
         responsive_review = visual_review.get("responsive_review") or {}
         screenshot_status = visual_review.get("screenshot_status")
+        requires_route_state_coverage = bool(visual_review.get("requires_route_state_coverage", True))
         missing_states = [
             state_name
             for state_name, covered in state_coverage.items()
-            if state_name in {"loading_state", "empty_state", "error_state", "success_state"} and not covered
+            if requires_route_state_coverage
+            and state_name in {"loading_state", "empty_state", "error_state", "success_state"}
+            and not covered
         ]
         return {
             "screenshot_status": screenshot_status,
             "artifact_count": visual_review.get("artifact_count", 0),
+            "requires_route_state_coverage": requires_route_state_coverage,
             "missing_states": sorted(missing_states),
             "responsive_categories": responsive_review.get("categories_present", []),
             "missing_responsive_categories": responsive_review.get("missing_categories", []) if screenshot_status == "passed" else [],

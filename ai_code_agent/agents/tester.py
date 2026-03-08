@@ -577,6 +577,7 @@ class TesterAgent(BaseAgent):
         component_files = [file_path for file_path in changed_files if self._is_next_component_file(file_path)]
         loading_files = [file_path for file_path in changed_files if file_path.endswith("loading.tsx") or file_path.endswith("loading.ts")]
         error_files = [file_path for file_path in changed_files if file_path.endswith("error.tsx") or file_path.endswith("error.ts")]
+        requires_route_state_coverage = bool(route_files or loading_files or error_files)
 
         state_files = sorted({*route_files, *component_files, *loading_files, *error_files})
 
@@ -629,6 +630,7 @@ class TesterAgent(BaseAgent):
             "enabled": True,
             "design_brief_present": isinstance(design_brief, dict),
             "design_brief": design_brief if isinstance(design_brief, dict) else None,
+            "requires_route_state_coverage": requires_route_state_coverage,
             "route_files": route_files,
             "component_files": component_files,
             "loading_files": loading_files,

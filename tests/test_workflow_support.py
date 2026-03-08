@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from ai_code_agent.config import AgentConfig
 from ai_code_agent.integrations.github_client import GitHubRequestError
-from ai_code_agent.integrations.workflow_support import build_branch_name, create_remote_pr, parse_issue_reference, resolve_issue_input
+from ai_code_agent.integrations.workflow_support import build_branch_name, build_pr_body, create_remote_pr, parse_issue_reference, resolve_issue_input
 
 
 class WorkflowSupportTest(unittest.TestCase):
@@ -61,6 +61,40 @@ class WorkflowSupportTest(unittest.TestCase):
         branch_name = build_branch_name({"provider": "github", "issue_number": 42, "title": "Fix flaky validation path"}, "fallback")
 
         self.assertEqual(branch_name, "ai-code-agent/gh-42-fix-flaky-validation-path")
+
+    def test_build_pr_body_preserves_multiline_plan_as_bullets(self) -> None:
+        body = build_pr_body(
+            {
+                "run_id": "run-123",
+                "patches": [{"file": "app/pricing/page.tsx"}],
+                "retry_count": 0,
+                "plan": "- Inspect the existing homepage.\n- Create a pricing route.\n- Run typecheck/build.",
+                "review_summary": {"changed_areas": ["app/pricing"]},
+            },
+            "ai-code-agent/gh-3-create-smartfarm-pricing-page",
+        )
+
+        self.assertIn("## Plan", body)
+        self.assertIn("- Inspect the existing homepage.", body)
+        self.assertIn("- Create a pricing route.", body)
+        self.assertIn("- Run typecheck/build.", body)
+        self.assertNotIn("homepage. - Create", body)
+
+    def test_build_pr_body_splits_flat_dash_separated_plan_when_needed(self) -> None:
+        body = build_pr_body(
+            {
+                "run_id": "run-123",
+                "patches": [{"file": "app/pricing/page.tsx"}],
+                "retry_count": 0,
+                "plan": "Inspect the existing homepage. - Create a pricing route. - Run typecheck/build.",
+                "review_summary": {},
+            },
+            "ai-code-agent/gh-3-create-smartfarm-pricing-page",
+        )
+
+        self.assertIn("- Inspect the existing homepage.", body)
+        self.assertIn("- Create a pricing route.", body)
+        self.assertIn("- Run typecheck/build.", body)
 
     def test_create_remote_pr_for_github_posts_issue_comment(self) -> None:
         client = Mock()
