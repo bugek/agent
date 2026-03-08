@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 VISUAL_REVIEW_ROOT = Path(".ai-code-agent") / "visual-review"
 VISUAL_REVIEW_MANIFEST_FILE = "manifest.json"
@@ -30,7 +31,8 @@ class TesterAgent(BaseAgent):
         )
         sandbox.start_container()
 
-        command_results = self._run_validation_commands(sandbox, state, workspace_profile)
+        validation_plan = self._build_validation_plan(state, workspace_profile)
+        command_results = self._run_validation_commands(sandbox, validation_plan["commands"])
 
         lint_output = []
         linter = LinterTool(state["workspace_dir"])
@@ -53,14 +55,18 @@ class TesterAgent(BaseAgent):
         return {
             "test_passed": test_passed,
             "test_results": "\n\n".join(combined_output).strip(),
-            "testing_summary": self._build_testing_summary(command_results, lint_output),
+            "testing_summary": self._build_testing_summary(command_results, lint_output, validation_plan),
             "visual_review": self._build_visual_review(state, workspace_profile, command_results),
         }
 
-    def _run_validation_commands(self, sandbox: SandboxRunner, state: AgentState, workspace_profile: dict) -> list[dict]:
+    def _run_validation_commands(
+        self,
+        sandbox: SandboxRunner,
+        commands: list[tuple[str, str, int, dict[str, str] | None]],
+    ) -> list[dict]:
         results: list[dict] = []
 
-        for label, command, timeout, env in self._build_validation_commands(state, workspace_profile):
+        for label, command, timeout, env in commands:
             result = sandbox.execute(command, timeout=timeout, env=env)
             result["label"] = label
             results.append(result)
@@ -69,7 +75,12 @@ class TesterAgent(BaseAgent):
 
         return results
 
-    def _build_testing_summary(self, command_results: list[dict], lint_output: list[str]) -> dict[str, object]:
+    def _build_testing_summary(
+        self,
+        command_results: list[dict],
+        lint_output: list[str],
+        validation_plan: dict[str, Any] | None = None,
+    ) -> dict[str, object]:
         commands: list[dict[str, object]] = []
         total_duration_ms = 0
         for result in command_results:
@@ -102,6 +113,25 @@ class TesterAgent(BaseAgent):
             "lint_issue_count": len(lint_output),
             "total_duration_ms": total_duration_ms,
             "slowest_command": slowest_command,
+            "validation_strategy": validation_plan.get("strategy", "full") if isinstance(validation_plan, dict) else "full",
+            "selected_command_labels": validation_plan.get("selected_labels", []) if isinstance(validation_plan, dict) else [],
+            "skipped_command_labels": validation_plan.get("skipped_labels", []) if isinstance(validation_plan, dict) else [],
+            "requested_retry_labels": validation_plan.get("requested_retry_labels", []) if isinstance(validation_plan, dict) else [],
+        }
+
+    def _build_validation_plan(self, state: AgentState, workspace_profile: dict) -> dict[str, Any]:
+        full_commands = self._build_validation_commands(state, workspace_profile)
+        selected_commands, requested_retry_labels = self._select_retry_commands(state, full_commands)
+        selected_labels = [label for label, _, _, _ in selected_commands]
+        full_labels = [label for label, _, _, _ in full_commands]
+        skipped_labels = [label for label in full_labels if label not in selected_labels]
+        strategy = "targeted_retry" if selected_labels != full_labels else "full"
+        return {
+            "strategy": strategy,
+            "commands": selected_commands,
+            "selected_labels": selected_labels,
+            "skipped_labels": skipped_labels,
+            "requested_retry_labels": requested_retry_labels,
         }
 
     def _build_validation_commands(self, state: AgentState, workspace_profile: dict) -> list[tuple[str, str, int, dict[str, str] | None]]:
@@ -119,6 +149,73 @@ class TesterAgent(BaseAgent):
             commands.extend(self._build_javascript_validation_commands(state, workspace_profile))
 
         return commands
+
+    def _select_retry_commands(
+        self,
+        state: AgentState,
+        full_commands: list[tuple[str, str, int, dict[str, str] | None]],
+    ) -> tuple[list[tuple[str, str, int, dict[str, str] | None]], list[str]]:
+        if int(state.get("retry_count", 0) or 0) <= 0:
+            return full_commands, []
+
+        review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
+        remediation = review_summary.get("remediation") if isinstance(review_summary.get("remediation"), dict) else {}
+        if not remediation.get("required"):
+            return full_commands, []
+
+        requested_labels = list(
+            dict.fromkeys(
+                [
+                    label
+                    for label in remediation.get("failed_validation_labels", [])
+                    if isinstance(label, str) and label
+                ]
+                + [
+                    label
+                    for label in (state.get("testing_summary") or {}).get("failed_commands", [])
+                    if isinstance(label, str) and label
+                ]
+                + self._visual_retry_labels(state, full_commands)
+            )
+        )
+        if not requested_labels:
+            return full_commands, []
+
+        selected: list[tuple[str, str, int, dict[str, str] | None]] = []
+        for command in full_commands:
+            label = command[0]
+            if label == "package-install":
+                continue
+            if label in requested_labels:
+                selected.append(command)
+
+        if not selected:
+            return full_commands, requested_labels
+
+        needs_install = any(label != "compileall" and label != "cli-help" for label, _, _, _ in selected)
+        package_install = next((command for command in full_commands if command[0] == "package-install"), None)
+        if package_install is not None and needs_install:
+            selected.insert(0, package_install)
+
+        return selected, requested_labels
+
+    def _visual_retry_labels(
+        self,
+        state: AgentState,
+        full_commands: list[tuple[str, str, int, dict[str, str] | None]],
+    ) -> list[str]:
+        review_summary = state.get("review_summary") if isinstance(state.get("review_summary"), dict) else {}
+        visual_review = review_summary.get("visual_review") if isinstance(review_summary.get("visual_review"), dict) else {}
+        screenshot_status = visual_review.get("screenshot_status")
+        missing_states = visual_review.get("missing_states") or []
+        missing_responsive = visual_review.get("missing_responsive_categories") or []
+        if screenshot_status not in {"failed", "missing_artifacts"} and not missing_states and not missing_responsive:
+            return []
+        return [
+            label
+            for label, _, _, _ in full_commands
+            if label in {"script:visual-review", "script:screenshot", "script:test:visual"}
+        ]
 
     def _install_command(self, workspace_profile: dict) -> str | None:
         if not workspace_profile.get("needs_install"):
