@@ -13,6 +13,12 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
             "files_to_edit": ["ai_code_agent/main.py"],
             "planning_context": {
                 "retrieval_strategy": "hybrid",
+                "selected_skills": [{"name": "release-readiness"}],
+                "blocked_skills": [{"name": "compose-stack", "permission": "sandbox"}],
+                "skill_invocations": [
+                    {"name": "release-readiness", "phase": "plan", "outcome": "applied"},
+                    {"name": "compose-stack", "phase": "plan", "outcome": "blocked"},
+                ],
                 "blocked_files_to_edit": [{"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule"}],
                 "graph_seed_files": ["ai_code_agent/main.py", "ai_code_agent/orchestrator.py"],
             },
@@ -42,6 +48,11 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["attempt"], 1)
         self.assertEqual(event["event_type"], "node_completed")
         self.assertEqual(event["details"]["retrieval_strategy"], "hybrid")
+        self.assertEqual(event["details"]["selected_skills"], ["release-readiness"])
+        self.assertEqual(event["details"]["blocked_skill_count"], 1)
+        self.assertEqual(event["details"]["skill_invocation_count"], 2)
+        self.assertEqual(event["details"]["skill_invocations"][0], {"name": "release-readiness", "phase": "plan", "outcome": "applied"})
+        self.assertEqual(event["details"]["skill_invocations"][1], {"name": "compose-stack", "phase": "plan", "outcome": "blocked"})
         self.assertEqual(event["details"]["blocked_files_to_edit"], 1)
         self.assertEqual(event["details"]["graph_seed_files"], 2)
         self.assertEqual(event["details"]["edit_intent_count"], 0)

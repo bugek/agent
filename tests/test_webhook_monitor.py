@@ -22,6 +22,9 @@ class WebhookMonitorTest(unittest.TestCase):
             screenshots_dir = Path(temp_dir) / ".ai-code-agent" / "visual-review" / "screenshots"
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             (screenshots_dir / "home.png").write_bytes(b"png-bytes")
+            compose_logs_path = Path(temp_dir) / ".ai-code-agent" / "compose" / "demo-stack-logs.txt"
+            compose_logs_path.parent.mkdir(parents=True, exist_ok=True)
+            compose_logs_path.write_text("app | booting\n", encoding="utf-8")
             first_metrics = {
                 "schema_version": "execution-metrics/v1",
                 "run_id": "run-1",
@@ -36,7 +39,8 @@ class WebhookMonitorTest(unittest.TestCase):
                 "run_id": "run-2",
                 "workflow": {"status": "running", "duration_ms": 120, "terminal_node": "code", "active_node": "test"},
                 "failures": {"primary_category": "validation", "subcategory": "command:typescript:noEmit"},
-                "planning": {"plan_summary": "Upgrade the monitor UI and keep the API contract stable.", "retrieval_strategy": "hybrid"},
+                "planning": {"plan_summary": "Upgrade the monitor UI and keep the API contract stable.", "retrieval_strategy": "hybrid", "available_skill_count": 2, "selected_skill_count": 1, "blocked_skill_count": 1, "selected_skills": [{"name": "frontend-visual-review", "title": "Frontend Visual Review", "description": "Keep screenshot-backed UI checks visible in planning.", "path": "skills/frontend-visual-review/SKILL.md", "permission": "read-only", "sandbox": "optional", "score": 7, "reasons": ["Issue matched: screenshot"]}], "blocked_skills": [{"name": "compose-stack", "permission": "sandbox"}]},
+                "skills": {"invocation_count": 2, "outcome_counts": {"applied": 1, "blocked": 1}, "invocations": [{"name": "frontend-visual-review", "phase": "plan", "outcome": "applied", "permission": "read-only"}, {"name": "compose-stack", "phase": "plan", "outcome": "blocked", "permission": "sandbox", "blocked_reason": "permission_not_allowed:sandbox"}]},
                 "testing": {"validation_strategy": "targeted_retry"},
                 "review": {"status": "changes_required", "approved": False, "remediation_required": True, "remediation": {"guidance": ["Fix the failing typecheck."], "focus_areas": ["monitor_frontend/src/App.tsx"]}},
                 "create_pr": {"outcome": "skipped", "reason": "review_not_approved", "provider": "github", "message": "Skipped PR creation until validation passes."},
@@ -49,6 +53,9 @@ class WebhookMonitorTest(unittest.TestCase):
                 "testing": {
                     "validation_strategy": "targeted_retry",
                     "commands": [{"label": "typescript:noEmit", "exit_code": 1, "duration_ms": 2200, "mode": "local"}],
+                    "compose_readiness_status": "ready",
+                    "compose_ready_services": ["app", "db"],
+                    "compose_logs_path": ".ai-code-agent/compose/demo-stack-logs.txt",
                     "visual_review": {"screenshot_status": "passed", "artifact_count": 1},
                 },
             }
@@ -67,11 +74,27 @@ class WebhookMonitorTest(unittest.TestCase):
             self.assertEqual(payload["latest"]["workflow"]["active_node"], "test")
             self.assertEqual(payload["rows"][0]["run_id"], "run-2")
             self.assertEqual(payload["rows"][0]["failure_subcategory"], "command:typescript:noEmit")
+            self.assertEqual(payload["rows"][0]["selected_skills"], ["frontend-visual-review"])
             self.assertEqual(payload["phase_details"]["test"]["title"], "Tester agent")
             self.assertIn("Validation strategy: targeted_retry", payload["phase_details"]["test"]["inputs"])
+            self.assertIn("Selected skills: frontend-visual-review", payload["phase_details"]["plan"]["outputs"])
+            self.assertIn("Skill invocations: frontend-visual-review | applied | plan, compose-stack | blocked | plan", payload["phase_details"]["plan"]["outputs"])
+            self.assertIn("Available skills: 2", payload["phase_details"]["plan"]["highlights"])
+            self.assertIn("Blocked skills: 1", payload["phase_details"]["plan"]["highlights"])
+            self.assertIn("Skill invocation outcomes: applied:1, blocked:1", payload["phase_details"]["plan"]["highlights"])
+            self.assertEqual(payload["phase_details"]["plan"]["skills"][0]["name"], "frontend-visual-review")
+            self.assertEqual(payload["phase_details"]["plan"]["skills"][0]["score"], 7)
+            self.assertEqual(payload["phase_details"]["plan"]["blocked_skills"][0]["name"], "compose-stack")
+            self.assertEqual(payload["phase_details"]["plan"]["skill_invocations"][0]["outcome"], "applied")
+            self.assertEqual(payload["phase_details"]["plan"]["skill_invocations"][1]["outcome"], "blocked")
             self.assertIn("Plan summary: Upgrade the monitor UI and keep the API contract stable.", payload["phase_details"]["plan"]["outputs"])
             self.assertIn("Remediation guidance: Fix the failing typecheck.", payload["phase_details"]["review"]["outputs"])
             self.assertIn("Command: typescript:noEmit (exit=1, duration_ms=2200, mode=local)", payload["phase_details"]["test"]["outputs"])
+            self.assertIn("Compose readiness: ready", payload["phase_details"]["test"]["outputs"])
+            self.assertIn("Compose logs: .ai-code-agent/compose/demo-stack-logs.txt", payload["phase_details"]["test"]["outputs"])
+            self.assertIn("Compose ready services: app, db", payload["phase_details"]["test"]["highlights"])
+            self.assertEqual(payload["phase_details"]["test"]["artifacts"][0]["path"], ".ai-code-agent/compose/demo-stack-logs.txt")
+            self.assertIn("/api/monitor/artifact?repo=", payload["phase_details"]["test"]["artifacts"][0]["url"])
             self.assertIn("Screenshot status: passed", payload["phase_details"]["test"]["outputs"])
             self.assertIn("Screenshot artifacts: 1", payload["phase_details"]["test"]["outputs"])
             self.assertIn("Message: Skipped PR creation until validation passes.", payload["phase_details"]["create_pr"]["outputs"])
@@ -124,6 +147,20 @@ class WebhookMonitorTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.content, b"png-bytes")
             self.assertEqual(response.headers["content-type"], "image/png")
+
+    @unittest.skipIf(TestClient is None or app is None, "fastapi test client unavailable")
+    def test_monitor_artifact_route_serves_compose_log_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / ".ai-code-agent" / "compose" / "demo-stack-logs.txt"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("app | booting\n", encoding="utf-8")
+
+            client = TestClient(app)
+            response = client.get("/api/monitor/artifact", params={"repo": temp_dir, "path": ".ai-code-agent/compose/demo-stack-logs.txt"})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.text.replace("\r\n", "\n"), "app | booting\n")
+            self.assertEqual(response.headers["content-type"], "text/plain; charset=utf-8")
 
 
 if __name__ == "__main__":

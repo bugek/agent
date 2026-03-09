@@ -26,6 +26,7 @@ from ai_code_agent.metrics import build_execution_metrics_trend, list_execution_
 VISUAL_REVIEW_ROOT = Path('.ai-code-agent') / 'visual-review'
 VISUAL_REVIEW_MANIFEST = 'manifest.json'
 VISUAL_REVIEW_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp'}
+TEXT_ARTIFACT_EXTENSIONS = {'.txt', '.log', '.json', '.ndjson', '.md'}
 
 
 def _monitor_frontend_url(repo: str | None = None, recent: int | None = None) -> str:
@@ -43,6 +44,42 @@ def _monitor_frontend_url(repo: str | None = None, recent: int | None = None) ->
 def _join_items(items: list[str]) -> str:
     filtered = [item for item in items if item]
     return ", ".join(filtered) if filtered else "none"
+
+
+def _planning_skill_names(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item:
+            names.append(item)
+            continue
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("title")
+            if isinstance(name, str) and name:
+                names.append(name)
+    return names
+
+
+def _skill_invocation_summaries(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    summaries: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("title")
+        outcome = item.get("outcome")
+        phase = item.get("phase")
+        if not isinstance(name, str) or not name:
+            continue
+        parts = [name]
+        if isinstance(outcome, str) and outcome:
+            parts.append(outcome)
+        if isinstance(phase, str) and phase:
+            parts.append(phase)
+        summaries.append(" | ".join(parts))
+    return summaries
 
 
 def _command_summaries(commands: object) -> list[str]:
@@ -160,6 +197,19 @@ def _monitor_image_entries(workspace_dir: str) -> list[dict[str, object]]:
     return images
 
 
+def _monitor_artifact_entry(workspace_dir: str, relative_path: str, *, title: str, caption: str, kind: str) -> dict[str, str] | None:
+    resolved = _resolve_workspace_file(workspace_dir, relative_path)
+    if resolved is None or not resolved.exists() or not resolved.is_file():
+        return None
+    return {
+        'path': _relative_workspace_path(workspace_dir, resolved),
+        'title': title,
+        'caption': caption,
+        'kind': kind,
+        'url': f"/api/monitor/artifact?{urlencode({'repo': workspace_dir, 'path': _relative_workspace_path(workspace_dir, resolved)})}",
+    }
+
+
 def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None = None) -> dict[str, dict[str, object]]:
     issue = metrics.get("issue") if isinstance(metrics.get("issue"), dict) else {}
     workspace = metrics.get("workspace") if isinstance(metrics.get("workspace"), dict) else {}
@@ -178,6 +228,24 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
     failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
     requested_retry_labels = testing.get("requested_retry_labels") if isinstance(testing.get("requested_retry_labels"), list) else []
     monitor_images = _monitor_image_entries(workspace_dir) if workspace_dir else []
+    selected_skills = planning.get("selected_skills") if isinstance(planning.get("selected_skills"), list) else []
+    blocked_skills = planning.get("blocked_skill_details") if isinstance(planning.get("blocked_skill_details"), list) else []
+    if not blocked_skills:
+        blocked_skills = planning.get("blocked_skills") if isinstance(planning.get("blocked_skills"), list) else []
+    skill_invocations = ((metrics.get("skills") if isinstance(metrics.get("skills"), dict) else {}) or {}).get("invocations")
+    if not isinstance(skill_invocations, list):
+        skill_invocations = []
+    compose_log_artifacts: list[dict[str, str]] = []
+    if workspace_dir and isinstance(testing.get("compose_logs_path"), str) and testing.get("compose_logs_path"):
+        compose_log_artifact = _monitor_artifact_entry(
+            workspace_dir,
+            testing["compose_logs_path"],
+            title="Compose logs",
+            caption="Captured docker compose logs for this run",
+            kind="compose-log",
+        )
+        if compose_log_artifact is not None:
+            compose_log_artifacts.append(compose_log_artifact)
 
     return {
         "plan": {
@@ -190,14 +258,23 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
             "outputs": [
                 f"Plan summary: {planning.get('plan_summary') or 'none'}",
                 f"Retrieval strategy: {planning.get('retrieval_strategy') or 'none'}",
+                f"Selected skills: {_join_items(_planning_skill_names(selected_skills))}",
+                f"Skill invocations: {_join_items(_skill_invocation_summaries(skill_invocations))}",
                 f"Candidate files: {planning.get('candidate_file_count') or 0}",
                 f"Files to edit: {planning.get('files_to_edit_count') or 0}",
                 f"Edit intent count: {planning.get('edit_intent_count') or 0}",
             ],
             "highlights": [
+                f"Available skills: {planning.get('available_skill_count') or 0}",
+                f"Blocked skills: {planning.get('blocked_skill_count') or 0}",
+                f"Skill invocation outcomes: {_join_items([f'{key}:{value}' for key, value in ((metrics.get('skills') if isinstance(metrics.get('skills'), dict) else {}) or {}).get('outcome_counts', {}).items() if isinstance(key, str)])}",
                 f"Graph seed files: {planning.get('graph_seed_file_count') or 0}",
                 f"Blocked files: {planning.get('blocked_file_count') or 0}",
             ],
+            "skills": [item for item in selected_skills if isinstance(item, dict)],
+            "blocked_skills": [item for item in blocked_skills if isinstance(item, dict)],
+            "skill_invocations": [item for item in skill_invocations if isinstance(item, dict)],
+            "artifacts": [],
             "images": [],
         },
         "code": {
@@ -231,6 +308,8 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
                 f"Testing status: {testing.get('status') or 'none'}",
                 f"Failed commands: {_join_items([str(item) for item in failed_commands if isinstance(item, str)])}",
                 f"Lint issues: {testing.get('lint_issue_count') or 0}",
+                f"Compose readiness: {testing.get('compose_readiness_status') or 'none'}",
+                f"Compose logs: {testing.get('compose_logs_path') or 'none'}",
                 f"Screenshot status: {((testing.get('visual_review') if isinstance(testing.get('visual_review'), dict) else {}) or {}).get('screenshot_status') or 'none'}",
                 f"Screenshot artifacts: {((testing.get('visual_review') if isinstance(testing.get('visual_review'), dict) else {}) or {}).get('artifact_count') or 0}",
                 *[f"Command: {item}" for item in _command_summaries(testing.get('commands'))],
@@ -238,8 +317,10 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
             "highlights": [
                 f"Requested retry labels: {_join_items([str(item) for item in requested_retry_labels if isinstance(item, str)])}",
                 f"Skipped commands: {testing.get('skipped_command_count') or 0}",
+                f"Compose ready services: {_join_items([str(item) for item in testing.get('compose_ready_services', []) if isinstance(item, str)])}",
                 f"Failure taxonomy: {failures.get('primary_category') or 'none'}/{failures.get('subcategory') or 'none'}",
             ],
+            "artifacts": compose_log_artifacts,
             "images": monitor_images,
         },
         "review": {
@@ -260,6 +341,7 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
                 f"Remediation required: {'yes' if review.get('remediation_required') else 'no'}",
                 f"Focus areas: {_join_items([str(item) for item in review_remediation.get('focus_areas', []) if isinstance(item, str)])}",
             ],
+            "artifacts": [],
             "images": monitor_images,
         },
         "create_pr": {
@@ -279,6 +361,7 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
                 f"Branch: {create_pr.get('branch_name') or 'none'}",
                 f"PR URL: {create_pr.get('pr_url') or 'none'}",
             ],
+            "artifacts": [],
             "images": [],
         },
     }
@@ -303,6 +386,7 @@ def _monitor_payload(repo: str | None, recent: int) -> dict[str, object]:
                 "primary_failure": failures.get("primary_category") or "",
                 "failure_subcategory": failures.get("subcategory") or "",
                 "validation_strategy": testing.get("validation_strategy") or "full",
+                "selected_skills": _planning_skill_names((metrics.get("planning") or {}).get("selected_skills") if isinstance(metrics.get("planning"), dict) else []),
                 "duration_ms": workflow.get("duration_ms") or 0,
                 "path": path,
             }
@@ -346,13 +430,13 @@ if FastAPI is not None:
 
     @app.get('/api/monitor/artifact')
     async def monitor_artifact(repo: str = Query(...), path: str = Query(...)):
-        """Serve a visual-review artifact from the requested workspace."""
+        """Serve a monitor artifact from the requested workspace."""
         if FileResponse is None or HTTPException is None:
             raise RuntimeError('fastapi responses must be installed to return monitor artifacts')
         resolved = _resolve_workspace_file(repo, path)
         if resolved is None or not resolved.exists() or not resolved.is_file():
             raise HTTPException(status_code=404, detail='artifact not found')
-        if resolved.suffix.lower() not in VISUAL_REVIEW_IMAGE_EXTENSIONS:
+        if resolved.suffix.lower() not in VISUAL_REVIEW_IMAGE_EXTENSIONS.union(TEXT_ARTIFACT_EXTENSIONS):
             raise HTTPException(status_code=400, detail='unsupported artifact type')
         media_type = mimetypes.guess_type(str(resolved))[0] or 'application/octet-stream'
         return FileResponse(path=resolved, media_type=media_type, content_disposition_type='inline')

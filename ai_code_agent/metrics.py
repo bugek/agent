@@ -90,8 +90,24 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "graph_seed_file_count": _count_items(planning_context.get("graph_seed_files")),
             "blocked_file_count": _count_items(planning_context.get("blocked_files_to_edit")),
             "files_to_edit_count": _count_items(state.get("files_to_edit")),
+            "available_skill_count": _as_int(planning_context.get("available_skill_count")),
+            "selected_skill_count": _count_items(planning_context.get("selected_skills")),
+            "selected_skills": _selected_skill_names(planning_context.get("selected_skills")),
+            "selected_skill_details": _planning_skill_details(planning_context.get("selected_skills")),
+            "blocked_skill_count": _count_items(planning_context.get("blocked_skills")),
+            "blocked_skills": _selected_skill_names(planning_context.get("blocked_skills")),
+            "blocked_skill_details": _planning_skill_details(planning_context.get("blocked_skills")),
+            "skill_invocation_count": len(_planning_skill_invocations(planning_context)),
             "edit_intent_count": _count_items(planning_context.get("edit_intent")),
             "plan_summary": _summary_text(state.get("plan")),
+        },
+        "skills": {
+            "invocation_count": len(_planning_skill_invocations(planning_context)),
+            "failed_invocation_count": len([item for item in _planning_skill_invocations(planning_context) if item.get("outcome") == "failed"]),
+            "blocked_invocation_count": len([item for item in _planning_skill_invocations(planning_context) if item.get("outcome") == "blocked"]),
+            "phase_counts": _skill_phase_counts(_planning_skill_invocations(planning_context)),
+            "outcome_counts": _skill_outcome_counts(_planning_skill_invocations(planning_context)),
+            "invocations": _planning_skill_invocations(planning_context),
         },
         "coding": {
             "generated_by": codegen_summary.get("generated_by"),
@@ -117,6 +133,11 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "sandbox_mode": testing_summary.get("sandbox_mode"),
             "sandbox_started": bool(testing_summary.get("sandbox_started", False)),
             "sandbox_fallback_reason": testing_summary.get("sandbox_fallback_reason"),
+            "compose_readiness_status": testing_summary.get("compose_readiness_status"),
+            "compose_ready_services": [
+                service for service in testing_summary.get("compose_ready_services", []) if isinstance(service, str) and service
+            ] if isinstance(testing_summary.get("compose_ready_services"), list) else [],
+            "compose_logs_path": testing_summary.get("compose_logs_path"),
             "validation_strategy": testing_summary.get("validation_strategy") or "full",
             "retry_policy_reason": testing_summary.get("retry_policy_reason"),
             "retry_policy_history_source": testing_summary.get("retry_policy_history_source"),
@@ -983,6 +1004,7 @@ def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, An
     workflow = metrics.get("workflow") if isinstance(metrics.get("workflow"), dict) else {}
     failures = _normalized_failure_info_from_metrics(metrics)
     testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
+    planning = metrics.get("planning") if isinstance(metrics.get("planning"), dict) else {}
     create_pr = metrics.get("create_pr") if isinstance(metrics.get("create_pr"), dict) else {}
     effectiveness = metrics.get("effectiveness") if isinstance(metrics.get("effectiveness"), dict) else {}
     return {
@@ -991,6 +1013,7 @@ def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, An
         "primary_failure": failures.get("primary_category") or "",
         "failure_subcategory": failures.get("subcategory") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "selected_skills": _selected_skill_names(planning.get("selected_skills")),
         "create_pr_outcome": create_pr.get("outcome") or "",
         "create_pr_reason": create_pr.get("reason") or "",
         "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
@@ -1479,7 +1502,126 @@ def _count_items(value: Any) -> int:
 
 
 def _count_mapping_entries(value: Any) -> int:
-    return len(value) if isinstance(value, dict) else 0
+    return len(value) if isinstance(value, (dict, list, tuple)) else 0
+
+
+def _selected_skill_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("title")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
+
+
+def _planning_skill_details(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    details: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        details.append(
+            {
+                "name": item.get("name"),
+                "version": item.get("version"),
+                "title": item.get("title"),
+                "description": item.get("description"),
+                "path": item.get("path"),
+                "permission": item.get("permission"),
+                "sandbox": item.get("sandbox"),
+                "score": item.get("score"),
+                "reasons": [
+                    reason for reason in item.get("reasons", []) if isinstance(reason, str) and reason
+                ] if isinstance(item.get("reasons"), list) else [],
+                "blocked_reason": item.get("blocked_reason") if isinstance(item.get("blocked_reason"), str) else None,
+            }
+        )
+    return details
+
+
+def _planning_skill_invocations(planning_context: Any) -> list[dict[str, Any]]:
+    if not isinstance(planning_context, dict):
+        return []
+
+    raw_invocations = planning_context.get("skill_invocations")
+    if isinstance(raw_invocations, list):
+        return _normalize_skill_invocations(raw_invocations)
+
+    fallback_invocations: list[dict[str, Any]] = []
+    for item in _planning_skill_details(planning_context.get("selected_skills")):
+        fallback_invocations.append(
+            {
+                "name": item.get("name"),
+                "version": item.get("version"),
+                "title": item.get("title"),
+                "phase": "plan",
+                "outcome": "applied",
+                "permission": item.get("permission"),
+                "sandbox": item.get("sandbox"),
+                "blocked_reason": None,
+            }
+        )
+    for item in _planning_skill_details(planning_context.get("blocked_skills")):
+        fallback_invocations.append(
+            {
+                "name": item.get("name"),
+                "version": item.get("version"),
+                "title": item.get("title"),
+                "phase": "plan",
+                "outcome": "blocked",
+                "permission": item.get("permission"),
+                "sandbox": item.get("sandbox"),
+                "blocked_reason": item.get("blocked_reason"),
+            }
+        )
+    return _normalize_skill_invocations(fallback_invocations)
+
+
+def _normalize_skill_invocations(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        outcome = item.get("outcome") if isinstance(item.get("outcome"), str) and item.get("outcome") else None
+        phase = item.get("phase") if isinstance(item.get("phase"), str) and item.get("phase") else None
+        normalized.append(
+            {
+                "name": item.get("name"),
+                "version": item.get("version"),
+                "title": item.get("title"),
+                "phase": phase,
+                "outcome": outcome,
+                "permission": item.get("permission"),
+                "sandbox": item.get("sandbox"),
+                "blocked_reason": item.get("blocked_reason") if isinstance(item.get("blocked_reason"), str) else None,
+            }
+        )
+    return normalized
+
+
+def _skill_phase_counts(invocations: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in invocations:
+        phase = item.get("phase")
+        if isinstance(phase, str) and phase:
+            counts[phase] = counts.get(phase, 0) + 1
+    return counts
+
+
+def _skill_outcome_counts(invocations: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in invocations:
+        outcome = item.get("outcome")
+        if isinstance(outcome, str) and outcome:
+            counts[outcome] = counts.get(outcome, 0) + 1
+    return counts
 
 
 def _as_int(value: Any) -> int:

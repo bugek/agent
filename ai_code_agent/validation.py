@@ -46,6 +46,7 @@ def get_validation_steps(mode: str) -> list[ValidationStep]:
         raise ValueError(f"Unsupported validation mode: {mode}")
     return quick_steps + [
         ValidationStep("nestjs smoke", [sys.executable, "artifact/run_nestjs_smoke.py"]),
+        ValidationStep("compose smoke", [sys.executable, "artifact/run_compose_smoke.py"]),
         ValidationStep("nextjs visual review smoke", [sys.executable, "artifact/run_nextjs_visual_review_smoke.py"]),
         ValidationStep("retrieval evaluation", [sys.executable, "artifact/run_retrieval_eval.py"]),
     ]
@@ -62,7 +63,16 @@ def _run_step(step: ValidationStep) -> int:
 
 
 def sandbox_preflight(config: AgentConfig) -> dict[str, object]:
-    return SandboxRunner(config.docker_image, workspace_dir=str(REPO_ROOT), mode=config.sandbox_mode).probe()
+    return SandboxRunner(
+        config.docker_image,
+        workspace_dir=str(REPO_ROOT),
+        mode=config.sandbox_mode,
+        compose_file=config.sandbox_compose_file,
+        compose_service=config.sandbox_compose_service,
+        compose_project_name=config.sandbox_compose_project_name,
+        compose_ready_services=config.sandbox_compose_ready_services,
+        compose_readiness_timeout_seconds=config.sandbox_compose_readiness_timeout_seconds,
+    ).probe()
 
 
 def _print_sandbox_preflight(report: dict[str, object]) -> None:

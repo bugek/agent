@@ -68,7 +68,16 @@ def run_health_check(config: AgentConfig, role: str | None, as_json: bool) -> in
     llm = LLMClient.from_config(config, role=role)
     report = llm.health_check()
     report["role"] = role or "default"
-    sandbox = SandboxRunner(config.docker_image, workspace_dir=config.workspace_dir, mode=config.sandbox_mode).probe()
+    sandbox = SandboxRunner(
+        config.docker_image,
+        workspace_dir=config.workspace_dir,
+        mode=config.sandbox_mode,
+        compose_file=config.sandbox_compose_file,
+        compose_service=config.sandbox_compose_service,
+        compose_project_name=config.sandbox_compose_project_name,
+        compose_ready_services=config.sandbox_compose_ready_services,
+        compose_readiness_timeout_seconds=config.sandbox_compose_readiness_timeout_seconds,
+    ).probe()
     report["sandbox"] = sandbox
 
     if as_json:

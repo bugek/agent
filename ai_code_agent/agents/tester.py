@@ -30,6 +30,11 @@ class TesterAgent(BaseAgent):
             container_image=self.config.docker_image,
             workspace_dir=state["workspace_dir"],
             mode=self.config.sandbox_mode,
+            compose_file=self.config.sandbox_compose_file,
+            compose_service=self.config.sandbox_compose_service,
+            compose_project_name=self.config.sandbox_compose_project_name,
+            compose_ready_services=self.config.sandbox_compose_ready_services,
+            compose_readiness_timeout_seconds=self.config.sandbox_compose_readiness_timeout_seconds,
         )
         sandbox_startup = sandbox.start_container()
 
@@ -129,6 +134,13 @@ class TesterAgent(BaseAgent):
             "sandbox_mode": sandbox_startup.get("resolved_mode") if isinstance(sandbox_startup, dict) else (commands[0].get("mode") if commands else None),
             "sandbox_started": bool(sandbox_startup.get("started", False)) if isinstance(sandbox_startup, dict) else True,
             "sandbox_fallback_reason": sandbox_startup.get("fallback_reason") if isinstance(sandbox_startup, dict) else None,
+            "compose_readiness_status": sandbox_startup.get("compose_readiness_status") if isinstance(sandbox_startup, dict) else None,
+            "compose_ready_services": [
+                service
+                for service in sandbox_startup.get("compose_ready_services", [])
+                if isinstance(service, str) and service
+            ] if isinstance(sandbox_startup, dict) else [],
+            "compose_logs_path": sandbox_startup.get("compose_logs_path") if isinstance(sandbox_startup, dict) else None,
         }
 
     def _build_validation_plan(self, state: AgentState, workspace_profile: dict) -> dict[str, Any]:

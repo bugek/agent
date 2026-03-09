@@ -181,6 +181,7 @@ def plan_node(state: AgentState) -> dict[str, Any]:
     result = agent.run(current_state)
     result = _with_run_identity(current_state, result)
     planning_context = result.get("planning_context", {})
+    skill_invocations = planning_context.get("skill_invocations", []) if isinstance(planning_context, dict) else []
     result["execution_log"] = _merge_logs(current_state, "Planner agent completed.")
     result["execution_events"] = _append_event(
         _event_state(current_state, result),
@@ -189,6 +190,23 @@ def plan_node(state: AgentState) -> dict[str, Any]:
         {
             "files_to_edit": len(result.get("files_to_edit", [])),
             "retrieval_strategy": planning_context.get("retrieval_strategy"),
+            "selected_skill_count": len(planning_context.get("selected_skills", [])),
+            "selected_skills": [
+                item.get("name")
+                for item in planning_context.get("selected_skills", [])
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            ],
+            "blocked_skill_count": len(planning_context.get("blocked_skills", [])),
+            "skill_invocation_count": len(skill_invocations) if isinstance(skill_invocations, list) else 0,
+            "skill_invocations": [
+                {
+                    "name": item.get("name"),
+                    "phase": item.get("phase"),
+                    "outcome": item.get("outcome"),
+                }
+                for item in skill_invocations
+                if isinstance(item, dict)
+            ],
             "blocked_files_to_edit": len(planning_context.get("blocked_files_to_edit", [])),
             "graph_seed_files": len(planning_context.get("graph_seed_files", [])),
             "edit_intent_count": len(planning_context.get("edit_intent", [])),

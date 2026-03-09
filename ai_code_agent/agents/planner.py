@@ -6,6 +6,7 @@ from pathlib import Path
 from ai_code_agent.agents.base import BaseAgent
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import PLANNER_SYSTEM_PROMPT
+from ai_code_agent.skills import discover_local_skills, partition_skills_by_permission, select_skills
 from ai_code_agent.tools.code_search import CodeSearch
 from ai_code_agent.tools.edit_policy import filter_edit_paths, summarize_edit_policy
 from ai_code_agent.tools.version_resolution import resolve_workspace_version_context
@@ -29,6 +30,24 @@ class PlannerAgent(BaseAgent):
         design_brief = self._extract_design_brief(issue, workspace_profile)
         version_resolution = resolve_workspace_version_context(state["workspace_dir"], issue, workspace_profile)
         remediation_context = self._planning_remediation_context(state)
+        available_skills = self._available_skills(state["workspace_dir"])
+        selected_skills = select_skills(
+            available_skills,
+            issue,
+            workspace_profile,
+            limit=max(0, self.config.skill_selection_limit),
+        )
+        selected_skills, blocked_skills = partition_skills_by_permission(
+            selected_skills,
+            self.config.skill_allowed_permissions,
+        )
+        skill_invocations = [
+            self._planning_skill_invocation_summary(skill, outcome="applied")
+            for skill in selected_skills
+        ] + [
+            self._planning_skill_invocation_summary(skill, outcome="blocked")
+            for skill in blocked_skills
+        ]
         retrieval_mode = self._normalized_retrieval_mode()
         scored_files = self._rank_candidate_files(search, state["workspace_dir"], workspace_profile, keywords, retrieval_mode)
         graph_seed_files = self._graph_seed_files(search, scored_files, keywords) if retrieval_mode == "hybrid" else []
@@ -61,6 +80,7 @@ class PlannerAgent(BaseAgent):
             "version_resolution": version_resolution,
             "retry_count": state.get("retry_count", 0),
             "remediation": remediation_context,
+            "selected_skills": selected_skills,
             "candidate_files": candidate_files[:10],
         }
         response = self.llm.generate_json(PLANNER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
@@ -89,6 +109,10 @@ class PlannerAgent(BaseAgent):
                 "design_brief": design_brief,
                 "version_resolution": version_resolution,
                 "file_edit_policy": file_edit_policy,
+                "available_skill_count": len(available_skills),
+                "selected_skills": [self._planning_skill_summary(skill) for skill in selected_skills],
+                "blocked_skills": [self._planning_skill_summary(skill) for skill in blocked_skills],
+                "skill_invocations": [item for item in skill_invocations if item],
                 "blocked_candidate_files": blocked_candidate_files[:10],
                 "blocked_files_to_edit": blocked_files_to_edit[:10],
                 "retrieval_strategy": retrieval_mode,
@@ -104,6 +128,41 @@ class PlannerAgent(BaseAgent):
                     for file_path, _ in scored_files[:10]
                 ],
             },
+        }
+
+    def _available_skills(self, workspace_dir: str):
+        if not self.config.skills_enabled:
+            return []
+        return discover_local_skills(workspace_dir, self.config.skill_registry_paths)
+
+    def _planning_skill_summary(self, skill: object) -> dict[str, object]:
+        if not isinstance(skill, dict):
+            return {}
+        return {
+            "name": skill.get("name"),
+            "version": skill.get("version"),
+            "title": skill.get("title"),
+            "description": skill.get("description"),
+            "path": skill.get("path"),
+            "permission": skill.get("permission"),
+            "sandbox": skill.get("sandbox"),
+            "score": skill.get("score"),
+            "reasons": skill.get("reasons") if isinstance(skill.get("reasons"), list) else [],
+            "blocked_reason": skill.get("blocked_reason") if isinstance(skill.get("blocked_reason"), str) else None,
+        }
+
+    def _planning_skill_invocation_summary(self, skill: object, *, outcome: str) -> dict[str, object]:
+        if not isinstance(skill, dict):
+            return {}
+        return {
+            "name": skill.get("name"),
+            "version": skill.get("version"),
+            "title": skill.get("title"),
+            "phase": "plan",
+            "outcome": outcome,
+            "permission": skill.get("permission"),
+            "sandbox": skill.get("sandbox"),
+            "blocked_reason": skill.get("blocked_reason") if isinstance(skill.get("blocked_reason"), str) else None,
         }
 
     def _rank_candidate_files(

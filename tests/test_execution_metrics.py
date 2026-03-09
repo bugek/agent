@@ -29,6 +29,13 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "retrieval_strategy": "hybrid",
                     "candidate_scores": {"app/page.tsx": 0.9, "components/panel.tsx": 0.8},
                     "graph_seed_files": ["app/page.tsx"],
+                    "available_skill_count": 2,
+                    "selected_skills": [{"name": "frontend-visual-review"}],
+                    "blocked_skills": [{"name": "compose-stack"}],
+                    "skill_invocations": [
+                        {"name": "frontend-visual-review", "phase": "plan", "outcome": "applied", "permission": "read-only"},
+                        {"name": "compose-stack", "phase": "plan", "outcome": "blocked", "permission": "sandbox", "blocked_reason": "permission_not_allowed:sandbox"},
+                    ],
                     "blocked_files_to_edit": [{"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule"}],
                     "edit_intent": [{"file_path": "app/page.tsx", "intent": "Fix dashboard render regression."}],
                 },
@@ -66,6 +73,9 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "sandbox_mode": "local",
                     "sandbox_started": True,
                     "sandbox_fallback_reason": "docker_unavailable",
+                    "compose_readiness_status": "ready",
+                    "compose_ready_services": ["app", "db"],
+                    "compose_logs_path": ".ai-code-agent/compose/demo-stack-logs.txt",
                 },
                 "visual_review": {
                     "enabled": True,
@@ -113,6 +123,23 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["workflow"]["status"], "changes_required")
         self.assertEqual(metrics["workflow"]["attempt_count"], 2)
         self.assertEqual(metrics["planning"]["candidate_file_count"], 2)
+        self.assertEqual(metrics["planning"]["available_skill_count"], 2)
+        self.assertEqual(metrics["planning"]["selected_skill_count"], 1)
+        self.assertEqual(metrics["planning"]["selected_skills"], ["frontend-visual-review"])
+        self.assertEqual(metrics["planning"]["selected_skill_details"][0]["name"], "frontend-visual-review")
+        self.assertEqual(metrics["planning"]["blocked_skill_count"], 1)
+        self.assertEqual(metrics["planning"]["blocked_skills"], ["compose-stack"])
+        self.assertEqual(metrics["planning"]["blocked_skill_details"][0]["name"], "compose-stack")
+        self.assertEqual(metrics["planning"]["skill_invocation_count"], 2)
+        self.assertEqual(metrics["skills"]["invocation_count"], 2)
+        self.assertEqual(metrics["skills"]["blocked_invocation_count"], 1)
+        self.assertEqual(metrics["skills"]["failed_invocation_count"], 0)
+        self.assertEqual(metrics["skills"]["phase_counts"], {"plan": 2})
+        self.assertEqual(metrics["skills"]["outcome_counts"], {"applied": 1, "blocked": 1})
+        self.assertEqual(metrics["skills"]["invocations"][0]["name"], "frontend-visual-review")
+        self.assertEqual(metrics["skills"]["invocations"][0]["phase"], "plan")
+        self.assertEqual(metrics["skills"]["invocations"][0]["outcome"], "applied")
+        self.assertEqual(metrics["skills"]["invocations"][1]["blocked_reason"], "permission_not_allowed:sandbox")
         self.assertEqual(metrics["planning"]["edit_intent_count"], 1)
         self.assertIn("Update the dashboard page safely", metrics["planning"]["plan_summary"])
         self.assertEqual(metrics["coding"]["blocked_operation_count"], 1)
@@ -128,6 +155,9 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["sandbox_mode"], "local")
         self.assertEqual(metrics["testing"]["sandbox_started"], True)
         self.assertEqual(metrics["testing"]["sandbox_fallback_reason"], "docker_unavailable")
+        self.assertEqual(metrics["testing"]["compose_readiness_status"], "ready")
+        self.assertEqual(metrics["testing"]["compose_ready_services"], ["app", "db"])
+        self.assertEqual(metrics["testing"]["compose_logs_path"], ".ai-code-agent/compose/demo-stack-logs.txt")
         self.assertEqual(metrics["testing"]["retry_policy_reason"], "history_prefers_targeted_retry")
         self.assertEqual(metrics["testing"]["retry_policy_history_source"], "failure_category")
         self.assertEqual(metrics["testing"]["retry_policy_confidence"], "weak")

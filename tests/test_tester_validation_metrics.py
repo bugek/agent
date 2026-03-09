@@ -47,6 +47,32 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(summary["sandbox_mode"], "local")
         self.assertEqual(summary["sandbox_started"], True)
         self.assertEqual(summary["sandbox_fallback_reason"], "docker_unavailable")
+        self.assertIsNone(summary["compose_readiness_status"])
+        self.assertEqual(summary["compose_ready_services"], [])
+        self.assertIsNone(summary["compose_logs_path"])
+
+    def test_build_testing_summary_tracks_compose_readiness_and_logs(self) -> None:
+        summary = self.agent._build_testing_summary(
+            [
+                {"label": "script:test", "exit_code": 0, "duration_ms": 500, "mode": "compose", "timed_out": False},
+            ],
+            [],
+            {"strategy": "full", "selected_labels": ["script:test"], "skipped_labels": [], "requested_retry_labels": []},
+            {
+                "requested_mode": "compose",
+                "resolved_mode": "compose",
+                "started": True,
+                "fallback_reason": None,
+                "compose_readiness_status": "ready",
+                "compose_ready_services": ["app", "db"],
+                "compose_logs_path": ".ai-code-agent/compose/demo-stack-logs.txt",
+            },
+        )
+
+        self.assertEqual(summary["sandbox_mode"], "compose")
+        self.assertEqual(summary["compose_readiness_status"], "ready")
+        self.assertEqual(summary["compose_ready_services"], ["app", "db"])
+        self.assertEqual(summary["compose_logs_path"], ".ai-code-agent/compose/demo-stack-logs.txt")
 
     def test_build_validation_plan_targets_retry_failures_for_nextjs_workspace(self) -> None:
         workspace_profile = {

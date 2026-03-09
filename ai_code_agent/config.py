@@ -15,6 +15,10 @@ def _split_globs(value: str | None, default: list[str] | None = None) -> list[st
     raw_value = value if value is not None else ",".join(default or [])
     return [item.strip() for item in raw_value.split(",") if item.strip()]
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    return os.getenv(name, "true" if default else "false").strip().lower() == "true"
+
 @dataclass
 class AgentConfig:
     """Configuration for the AI Code Agent."""
@@ -48,6 +52,11 @@ class AgentConfig:
     # Sandbox
     sandbox_mode: str = field(default_factory=lambda: os.getenv("SANDBOX_MODE", "auto"))
     docker_image: str = field(default_factory=lambda: os.getenv("DOCKER_IMAGE_NAME", "ai-code-agent-sandbox:latest"))
+    sandbox_compose_file: Optional[str] = field(default_factory=lambda: os.getenv("SANDBOX_COMPOSE_FILE"))
+    sandbox_compose_service: Optional[str] = field(default_factory=lambda: os.getenv("SANDBOX_COMPOSE_SERVICE"))
+    sandbox_compose_project_name: Optional[str] = field(default_factory=lambda: os.getenv("SANDBOX_COMPOSE_PROJECT_NAME"))
+    sandbox_compose_ready_services: list[str] = field(default_factory=lambda: _split_globs(os.getenv("SANDBOX_COMPOSE_READY_SERVICES")))
+    sandbox_compose_readiness_timeout_seconds: int = int(os.getenv("SANDBOX_COMPOSE_READINESS_TIMEOUT_SECONDS", "30"))
 
     # Runtime behavior
     workspace_dir: str = field(default_factory=lambda: os.getenv("AGENT_WORKSPACE_DIR", "."))
@@ -56,6 +65,10 @@ class AgentConfig:
     retrieval_mode: str = field(default_factory=lambda: os.getenv("RETRIEVAL_MODE", "hybrid"))
     edit_allow_globs: list[str] = field(default_factory=lambda: _split_globs(os.getenv("AGENT_EDIT_ALLOW_GLOBS")))
     edit_deny_globs: list[str] = field(default_factory=lambda: _split_globs(os.getenv("AGENT_EDIT_DENY_GLOBS"), [".git/**"]))
+    skills_enabled: bool = field(default_factory=lambda: _env_flag("AGENT_SKILLS_ENABLED", True))
+    skill_registry_paths: list[str] = field(default_factory=lambda: _split_globs(os.getenv("AGENT_SKILL_PATHS"), ["skills"]))
+    skill_selection_limit: int = int(os.getenv("AGENT_SKILL_SELECTION_LIMIT", "3"))
+    skill_allowed_permissions: list[str] = field(default_factory=lambda: _split_globs(os.getenv("AGENT_SKILL_ALLOWED_PERMISSIONS"), ["read-only"]))
     
     # Internal orchestrator limits
     max_retries: int = int(os.getenv("MAX_RETRIES", "3"))

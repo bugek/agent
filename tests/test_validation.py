@@ -31,7 +31,7 @@ class ValidationTest(unittest.TestCase):
 
         self.assertEqual(
             [step.label for step in steps],
-            ["compileall", "unit tests", "nestjs smoke", "nextjs visual review smoke", "retrieval evaluation"],
+            ["compileall", "unit tests", "nestjs smoke", "compose smoke", "nextjs visual review smoke", "retrieval evaluation"],
         )
 
     def test_run_step_invokes_subprocess_in_repo_root(self) -> None:
@@ -48,29 +48,30 @@ class ValidationTest(unittest.TestCase):
         with patch("ai_code_agent.validation.parse_args", return_value=Namespace(mode="full", require_docker_sandbox=False)), patch(
             "ai_code_agent.validation.sandbox_preflight", return_value=preflight
         ), patch(
-            "ai_code_agent.validation._run_step", side_effect=[0, 0, 0, 0, 0]
+            "ai_code_agent.validation._run_step", side_effect=[0, 0, 0, 0, 0, 0]
         ) as mock_run_step:
             exit_code = validation.main([])
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(mock_run_step.call_count, 5)
+        self.assertEqual(mock_run_step.call_count, 6)
         called_steps = [call.args[0] for call in mock_run_step.call_args_list]
         self.assertEqual(
             [step.label for step in called_steps],
-            ["compileall", "unit tests", "nestjs smoke", "nextjs visual review smoke", "retrieval evaluation"],
+            ["compileall", "unit tests", "nestjs smoke", "compose smoke", "nextjs visual review smoke", "retrieval evaluation"],
         )
         self.assertEqual(called_steps[0].command, [validation.sys.executable, "-m", "compileall", "ai_code_agent", "tests"])
         self.assertEqual(called_steps[1].command, [validation.sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
         self.assertEqual(called_steps[2].command, [validation.sys.executable, "artifact/run_nestjs_smoke.py"])
-        self.assertEqual(called_steps[3].command, [validation.sys.executable, "artifact/run_nextjs_visual_review_smoke.py"])
-        self.assertEqual(called_steps[4].command, [validation.sys.executable, "artifact/run_retrieval_eval.py"])
+        self.assertEqual(called_steps[3].command, [validation.sys.executable, "artifact/run_compose_smoke.py"])
+        self.assertEqual(called_steps[4].command, [validation.sys.executable, "artifact/run_nextjs_visual_review_smoke.py"])
+        self.assertEqual(called_steps[5].command, [validation.sys.executable, "artifact/run_retrieval_eval.py"])
 
     def test_main_stops_after_first_failing_step(self) -> None:
         preflight = {"requested_mode": "auto", "resolved_mode": "docker", "image": "demo-image", "degraded": False, "docker_sandbox_ready": True}
         with patch("ai_code_agent.validation.parse_args", return_value=Namespace(mode="full", require_docker_sandbox=False)), patch(
             "ai_code_agent.validation.sandbox_preflight", return_value=preflight
         ), patch(
-            "ai_code_agent.validation._run_step", side_effect=[0, 7, 0, 0, 0]
+            "ai_code_agent.validation._run_step", side_effect=[0, 7, 0, 0, 0, 0]
         ) as mock_run_step:
             exit_code = validation.main([])
 

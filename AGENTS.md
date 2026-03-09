@@ -161,6 +161,8 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 
 - `artifact/run_nestjs_smoke.py`: End-to-end NestJS smoke harness used to validate framework-aware generation and reviewer approval.
 - `artifact/fixtures/nestjs-smoke/`: Committed NestJS sample project used by the smoke harness.
+- `artifact/fixtures/compose-smoke/`: Committed Docker Compose sample stack used to validate compose-backed sandbox execution, readiness checks, command execution, log capture, and cleanup.
+- `artifact/run_compose_smoke.py`: End-to-end compose smoke harness that copies the fixture to a temp workspace, starts the compose stack through `SandboxRunner`, executes a command in the app service, captures compose logs, and tears the stack down.
 - `artifact/fixtures/nextjs-visual-review/`: Committed Next.js sample project showing the Playwright screenshot/manifest contract used by frontend visual review.
 - `artifact/run_nextjs_visual_review_smoke.py`: End-to-end visual-review smoke harness that installs the fixture, runs Playwright capture, and asserts manifest plus screenshot artifacts for CI.
 - `artifact/runtime_matrix.md`: Runtime compatibility matrix covering Python, CI Node, and framework fixture minimums plus the reason each version is pinned.
@@ -173,9 +175,9 @@ File-edit policy can be restricted with `AGENT_EDIT_ALLOW_GLOBS` and `AGENT_EDIT
 
 Reviewer output now includes a structured `review_summary` with changed areas, validation pass/fail labels, visual-review findings, residual risks, and remediation guidance so team review and retry loops can scan results faster.
 
-Execution traces now carry richer audit metadata in `execution_events`, including planner retrieval strategy and blocked targets, planner `edit_intent` counts, coder generation source and blocked operations, tester validation-strategy selection details, and reviewer summary status plus residual-risk counts.
+Execution traces now carry richer audit metadata in `execution_events`, including planner retrieval strategy, planner skill invocation outcomes, blocked targets, planner `edit_intent` counts, coder generation source and blocked operations, tester validation-strategy selection details, and reviewer summary status plus residual-risk counts.
 
-Production observability should aggregate those raw traces into the run-level `execution_metrics` schema described in `artifact/execution_metrics_schema.md`, including planner `edit_intent` counts, coder remediation usage, tester validation strategy metadata such as selected, skipped, and requested retry command labels, and effectiveness summaries such as retry recovery plus targeted-retry command reduction.
+Production observability should aggregate those raw traces into the run-level `execution_metrics` schema described in `artifact/execution_metrics_schema.md`, including planner `edit_intent` counts, planner skill invocation telemetry with phase and outcome, coder remediation usage, tester validation strategy metadata such as selected, skipped, and requested retry command labels, and effectiveness summaries such as retry recovery plus targeted-retry command reduction.
 
 Workflow runs can also persist the latest derived metrics artifact under `.ai-code-agent/runs/<run_id>/metrics.json` for operator diagnostics and CI artifact collection.
 

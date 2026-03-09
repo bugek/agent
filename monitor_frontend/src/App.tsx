@@ -17,6 +17,24 @@ type TestingMetrics = {
   validation_strategy?: string | null;
 };
 
+type PlanningSkill = {
+  name?: string | null;
+  title?: string | null;
+  description?: string | null;
+  path?: string | null;
+  permission?: string | null;
+  sandbox?: string | null;
+  score?: number | null;
+  reasons?: string[];
+  blocked_reason?: string | null;
+};
+
+type PlanningMetrics = {
+  available_skill_count?: number | null;
+  selected_skill_count?: number | null;
+  selected_skills?: string[];
+};
+
 type PhaseMetrics = {
   status?: string | null;
   attempts?: number | null;
@@ -29,12 +47,17 @@ type EventMetrics = {
   status?: string | null;
   attempt?: number | null;
   timestamp?: string | null;
+  details?: {
+    selected_skills?: string[];
+    blocked_skill_count?: number | null;
+  } | null;
 };
 
 type LatestMetrics = {
   run_id?: string | null;
   workflow?: WorkflowMetrics;
   failures?: FailureMetrics;
+  planning?: PlanningMetrics;
   testing?: TestingMetrics;
   phases?: Record<string, PhaseMetrics>;
   execution_events?: EventMetrics[];
@@ -46,6 +69,7 @@ type MonitorRow = {
   primary_failure?: string;
   failure_subcategory?: string;
   validation_strategy?: string;
+  selected_skills?: string[];
   duration_ms?: number;
   path?: string;
 };
@@ -69,7 +93,18 @@ type PhaseDetail = {
   inputs?: string[];
   outputs?: string[];
   highlights?: string[];
+  skills?: PlanningSkill[];
+  blocked_skills?: PlanningSkill[];
+  artifacts?: PhaseArtifact[];
   images?: PhaseImage[];
+};
+
+type PhaseArtifact = {
+  path?: string;
+  title?: string;
+  caption?: string;
+  kind?: string;
+  url?: string;
 };
 
 type PhaseImage = {
@@ -155,6 +190,15 @@ function resolveAssetUrl(apiBase: string, assetUrl?: string): string | undefined
   return joinUrl(apiBase, assetUrl.startsWith('/') ? assetUrl : `/${assetUrl}`);
 }
 
+function isInlineTextArtifact(artifact: PhaseArtifact): boolean {
+  const kind = (artifact.kind || '').toLowerCase();
+  const path = (artifact.path || '').toLowerCase();
+  if (kind.includes('log') || kind.includes('text')) {
+    return true;
+  }
+  return ['.txt', '.log', '.json', '.ndjson', '.md'].some((extension) => path.endsWith(extension));
+}
+
 function statusTone(status?: string | null): string {
   const normalized = (status || '').toLowerCase();
   if (['approved', 'passed', 'completed', 'running', 'in_progress', 'existing'].includes(normalized)) {
@@ -238,6 +282,12 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedPhase, setSelectedPhase] = useState<string>('plan');
+  const [selectedTextArtifact, setSelectedTextArtifact] = useState<PhaseArtifact | null>(null);
+  const [selectedTextArtifactContent, setSelectedTextArtifactContent] = useState<string>('');
+  const [selectedTextArtifactError, setSelectedTextArtifactError] = useState<string | null>(null);
+  const [selectedTextArtifactLoading, setSelectedTextArtifactLoading] = useState(false);
+  const [selectedTextArtifactQuery, setSelectedTextArtifactQuery] = useState('');
+  const [selectedTextArtifactCopyState, setSelectedTextArtifactCopyState] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -297,6 +347,7 @@ function App() {
   const latest = data?.latest || {};
   const workflow = latest.workflow || {};
   const failures = latest.failures || {};
+  const planning = latest.planning || {};
   const testing = latest.testing || {};
   const phaseMetrics = latest.phases || {};
   const phaseDetails = data?.phase_details || {};
@@ -310,6 +361,15 @@ function App() {
       return (activeNode && phaseNames.includes(activeNode)) ? activeNode : 'plan';
     });
   }, [activeNode, latest.run_id]);
+
+  useEffect(() => {
+    setSelectedTextArtifact(null);
+    setSelectedTextArtifactContent('');
+    setSelectedTextArtifactError(null);
+    setSelectedTextArtifactLoading(false);
+    setSelectedTextArtifactQuery('');
+    setSelectedTextArtifactCopyState(null);
+  }, [latest.run_id, selectedPhase]);
 
   const nodes: Node[] = phaseNames.map((phaseName, index) => {
     const phase = phaseMetrics[phaseName] || {};
@@ -376,7 +436,108 @@ function App() {
     : phaseHighlights(selectedPhaseName, selectedPhaseStatus, workflow, failures, testing);
   const selectedPhaseInputs = selectedPhaseDetail.inputs || [];
   const selectedPhaseOutputs = selectedPhaseDetail.outputs || [];
+  const selectedPhaseSkills = selectedPhaseDetail.skills || [];
+  const selectedPhaseBlockedSkills = selectedPhaseDetail.blocked_skills || [];
+  const selectedPhaseArtifacts = selectedPhaseDetail.artifacts || [];
   const selectedPhaseImages = selectedPhaseDetail.images || [];
+  const selectedSkillNames = planning.selected_skills || [];
+  const selectedTextArtifactLines = selectedTextArtifactContent ? selectedTextArtifactContent.split(/\r?\n/) : [];
+  const selectedTextArtifactQueryValue = selectedTextArtifactQuery.trim().toLowerCase();
+  const selectedTextArtifactFilteredLines = selectedTextArtifactQueryValue
+    ? selectedTextArtifactLines.filter((line) => line.toLowerCase().includes(selectedTextArtifactQueryValue))
+    : selectedTextArtifactLines;
+  const selectedTextArtifactDisplayContent = selectedTextArtifactQueryValue
+    ? selectedTextArtifactFilteredLines.join('\n')
+    : selectedTextArtifactContent;
+
+  useEffect(() => {
+    if (!selectedTextArtifact?.url) {
+      return;
+    }
+
+    const resolvedUrl = resolveAssetUrl(apiBase, selectedTextArtifact.url);
+    if (!resolvedUrl) {
+      setSelectedTextArtifactContent('');
+      setSelectedTextArtifactError('Artifact URL is missing.');
+      setSelectedTextArtifactLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setSelectedTextArtifactLoading(true);
+    setSelectedTextArtifactError(null);
+
+    fetch(resolvedUrl, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(`Artifact API returned ${response.status}`);
+        }
+        return response.text();
+      })
+      .then((text) => {
+        setSelectedTextArtifactContent(text);
+        setSelectedTextArtifactCopyState(null);
+      })
+      .catch((fetchError: unknown) => {
+        if (fetchError instanceof DOMException && fetchError.name === 'AbortError') {
+          return;
+        }
+        const message = fetchError instanceof Error ? fetchError.message : 'Unknown artifact fetch failure';
+        setSelectedTextArtifactContent('');
+        setSelectedTextArtifactError(message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setSelectedTextArtifactLoading(false);
+        }
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [apiBase, selectedTextArtifact]);
+
+  function handleArtifactClick(artifact: PhaseArtifact): void {
+    if (!isInlineTextArtifact(artifact)) {
+      return;
+    }
+    setSelectedTextArtifact((current) => {
+      if (current?.url === artifact.url && current?.path === artifact.path) {
+        return null;
+      }
+      return artifact;
+    });
+    setSelectedTextArtifactContent('');
+    setSelectedTextArtifactError(null);
+    setSelectedTextArtifactQuery('');
+    setSelectedTextArtifactCopyState(null);
+  }
+
+  async function handleCopyArtifactContent(): Promise<void> {
+    if (!selectedTextArtifactContent) {
+      setSelectedTextArtifactCopyState('Nothing to copy');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(selectedTextArtifactContent);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = selectedTextArtifactContent;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'absolute';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setSelectedTextArtifactCopyState('Copied');
+    } catch (_error) {
+      setSelectedTextArtifactCopyState('Copy failed');
+    }
+  }
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     setSelectedPhase(node.id);
@@ -442,6 +603,11 @@ function App() {
           <div className="metric-value">{asText(failures.subcategory || failures.primary_category)}</div>
           <p className="metric-note">Duration {formatDuration(workflow.duration_ms)}.</p>
         </article>
+        <article className="metric-card">
+          <div className="metric-label">Planner skills</div>
+          <div className="metric-value">{asText(planning.selected_skill_count ?? selectedSkillNames.length)}</div>
+          <p className="metric-note">Available {asText(planning.available_skill_count)}. {selectedSkillNames.length ? `Selected ${selectedSkillNames.join(', ')}.` : 'No skills selected for the latest run.'}</p>
+        </article>
       </section>
 
       <main className="content-grid">
@@ -505,6 +671,123 @@ function App() {
                 ) : <div className="empty-state">No summarized outputs captured for this step yet.</div>}
               </article>
             </div>
+            {selectedPhaseName === 'plan' ? (
+              <article className="detail-card detail-card--full">
+                <div className="detail-label">Selected skills</div>
+                {selectedPhaseSkills.length ? (
+                  <div className="skill-grid">
+                    {selectedPhaseSkills.map((skill) => (
+                      <article className="skill-card" key={`${skill.name}-${skill.path}`}>
+                        <div className="list-title-row">
+                          <strong>{skill.title || skill.name || 'Unnamed skill'}</strong>
+                          <span className="tag">Score {asText(skill.score)}</span>
+                        </div>
+                        <p className="skill-description">{skill.description || 'No skill description available.'}</p>
+                        <div className="tag-row">
+                          <span className="tag">{asText(skill.name)}</span>
+                          <span className="tag">Permission {asText(skill.permission)}</span>
+                          <span className="tag">Sandbox {asText(skill.sandbox)}</span>
+                        </div>
+                        <div className="skill-path">{asText(skill.path)}</div>
+                        {skill.reasons?.length ? (
+                          <ul className="detail-list detail-list--compact">
+                            {skill.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                          </ul>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                ) : <div className="empty-state">No planner skills were selected for this run.</div>}
+              </article>
+            ) : null}
+            {selectedPhaseName === 'plan' ? (
+              <article className="detail-card detail-card--full">
+                <div className="detail-label">Blocked skills</div>
+                {selectedPhaseBlockedSkills.length ? (
+                  <div className="skill-grid">
+                    {selectedPhaseBlockedSkills.map((skill) => (
+                      <article className="skill-card skill-card--blocked" key={`${skill.name}-${skill.path}-blocked`}>
+                        <div className="list-title-row">
+                          <strong>{skill.title || skill.name || 'Blocked skill'}</strong>
+                          <span className="tag">Permission {asText(skill.permission)}</span>
+                        </div>
+                        <p className="skill-description">{skill.description || 'This skill was blocked by the current permission policy.'}</p>
+                        <div className="tag-row">
+                          <span className="tag">{asText(skill.name)}</span>
+                          <span className="tag">Sandbox {asText(skill.sandbox)}</span>
+                        </div>
+                        <div className="skill-path">{asText(skill.path)}</div>
+                        <div className="blocked-reason">{asText(skill.blocked_reason || 'blocked by policy')}</div>
+                      </article>
+                    ))}
+                  </div>
+                ) : <div className="empty-state">No planner skills were blocked for this run.</div>}
+              </article>
+            ) : null}
+            {selectedPhaseArtifacts.length ? (
+              <article className="detail-card detail-card--full">
+                <div className="detail-label">Artifacts for this step</div>
+                <div className="artifact-grid">
+                  {selectedPhaseArtifacts.map((artifact) => {
+                    const resolvedUrl = resolveAssetUrl(apiBase, artifact.url);
+                    const isTextArtifact = isInlineTextArtifact(artifact);
+                    const isOpen = selectedTextArtifact?.url === artifact.url && selectedTextArtifact?.path === artifact.path;
+                    if (isTextArtifact) {
+                      return (
+                        <button className={`artifact-card artifact-card--button${isOpen ? ' artifact-card--active' : ''}`} key={`${artifact.path}-${artifact.url}`} onClick={() => handleArtifactClick(artifact)} type="button">
+                          <strong>{artifact.title || artifact.path || 'Artifact'}</strong>
+                          <span>{artifact.caption || artifact.path || 'Open artifact'}</span>
+                          <span className="artifact-action">{isOpen ? 'Hide inline log' : 'Show inline log'}</span>
+                        </button>
+                      );
+                    }
+                    return (
+                      <a className="artifact-card" href={resolvedUrl} key={`${artifact.path}-${artifact.url}`} rel="noreferrer" target="_blank">
+                        <strong>{artifact.title || artifact.path || 'Artifact'}</strong>
+                        <span>{artifact.caption || artifact.path || 'Open artifact'}</span>
+                      </a>
+                    );
+                  })}
+                </div>
+                {selectedTextArtifact ? (
+                  <section className="text-artifact-viewer">
+                    <div className="list-title-row">
+                      <strong>{selectedTextArtifact.title || selectedTextArtifact.path || 'Text artifact'}</strong>
+                      <div className="tag-row">
+                        {selectedTextArtifact.url ? (
+                          <a className="tag tag-link" href={resolveAssetUrl(apiBase, selectedTextArtifact.url)} rel="noreferrer" target="_blank">Open raw</a>
+                        ) : null}
+                        <button className="tag tag-button" onClick={() => void handleCopyArtifactContent()} type="button">Copy log</button>
+                        <button className="tag tag-button" onClick={() => setSelectedTextArtifact(null)} type="button">Collapse</button>
+                      </div>
+                    </div>
+                    {selectedTextArtifact.caption ? <div className="text-artifact-caption">{selectedTextArtifact.caption}</div> : null}
+                    {!selectedTextArtifactLoading && !selectedTextArtifactError ? (
+                      <div className="text-artifact-toolbar">
+                        <label className="text-artifact-search">
+                          <span>Filter lines</span>
+                          <input
+                            onChange={(event) => setSelectedTextArtifactQuery(event.target.value)}
+                            placeholder="error, failed command, traceback"
+                            type="text"
+                            value={selectedTextArtifactQuery}
+                          />
+                        </label>
+                        <div className="text-artifact-meta">
+                          <span>{selectedTextArtifactFilteredLines.length} / {selectedTextArtifactLines.length} lines</span>
+                          {selectedTextArtifactCopyState ? <span>{selectedTextArtifactCopyState}</span> : null}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedTextArtifactLoading ? <div className="empty-state">Loading log content...</div> : null}
+                    {!selectedTextArtifactLoading && selectedTextArtifactError ? <div className="notice error">{selectedTextArtifactError}</div> : null}
+                    {!selectedTextArtifactLoading && !selectedTextArtifactError ? (
+                      <pre className="text-artifact-content">{selectedTextArtifactDisplayContent || 'No matching lines found.'}</pre>
+                    ) : null}
+                  </section>
+                ) : null}
+              </article>
+            ) : null}
             <article className="detail-card detail-card--full">
               <div className="detail-label">Images for this step</div>
               {selectedPhaseImages.length ? (
@@ -533,6 +816,8 @@ function App() {
                     <div className="tag-row">
                       <span className="tag">Attempt {asText(event.attempt)}</span>
                       <span className="tag">{formatTimestamp(event.timestamp)}</span>
+                      {event.details?.selected_skills?.length ? <span className="tag">Skills {event.details.selected_skills.join(', ')}</span> : null}
+                      {(event.details?.blocked_skill_count || 0) > 0 ? <span className="tag">Blocked skills {asText(event.details?.blocked_skill_count)}</span> : null}
                     </div>
                   </article>
                 )) : <div className="empty-state">No persisted events yet for this step.</div>}
@@ -562,6 +847,8 @@ function App() {
                   <div className="tag-row">
                     <span className="tag">Attempt {asText(event.attempt)}</span>
                     <span className="tag">{formatTimestamp(event.timestamp)}</span>
+                    {event.details?.selected_skills?.length ? <span className="tag">Skills {event.details.selected_skills.join(', ')}</span> : null}
+                    {(event.details?.blocked_skill_count || 0) > 0 ? <span className="tag">Blocked skills {asText(event.details?.blocked_skill_count)}</span> : null}
                   </div>
                 </article>
               )) : <div className="empty-state">No execution events persisted yet.</div>}
@@ -586,6 +873,7 @@ function App() {
                   <div className="tag-row">
                     <span className="tag">{asText(row.validation_strategy)}</span>
                     <span className="tag">{formatDuration(row.duration_ms)}</span>
+                    {row.selected_skills?.length ? <span className="tag">Skills {row.selected_skills.join(', ')}</span> : null}
                   </div>
                   <div className="list-meta">Failure {asText(row.failure_subcategory || row.primary_failure)}</div>
                   <div className="list-path">{asText(row.path)}</div>

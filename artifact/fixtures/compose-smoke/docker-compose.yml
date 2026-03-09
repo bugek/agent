@@ -1,0 +1,8 @@
+services:
+  app:
+    image: busybox:1.36
+    command: ["sh", "-c", "echo app-ready && tail -f /dev/null"]
+
+  sidecar:
+    image: busybox:1.36
+    command: ["sh", "-c", "echo sidecar-ready && tail -f /dev/null"]
