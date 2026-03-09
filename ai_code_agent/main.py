@@ -1,6 +1,10 @@
 import argparse
 import json
+import os
+import subprocess
 import sys
+import time
+from pathlib import Path
 from ai_code_agent.config import AgentConfig
 from ai_code_agent.integrations.workflow_support import resolve_issue_input
 from ai_code_agent.llm.client import LLMClient
@@ -45,6 +49,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     normalize_parser.add_argument("--repo", type=str, required=False, help="Local path to the repository workspace")
     normalize_parser.add_argument("--run-id", type=str, required=False, help="Specific run id to normalize")
     normalize_parser.add_argument("--json", action="store_true", help="Print the normalization report as JSON")
+
+    monitor_parser = subparsers.add_parser("monitor", help="Launch the monitor backend API and frontend service together")
+    monitor_parser.add_argument("--repo", type=str, required=False, help="Workspace path to prefill in the monitor UI")
+    monitor_parser.add_argument("--recent", type=int, default=5, help="Recent run count to prefill in the monitor UI")
+    monitor_parser.add_argument("--backend-host", type=str, default="127.0.0.1", help="Host for the monitor backend API")
+    monitor_parser.add_argument("--backend-port", type=int, default=8000, help="Port for the monitor backend API")
+    monitor_parser.add_argument("--frontend-host", type=str, default="127.0.0.1", help="Host for the monitor frontend service")
+    monitor_parser.add_argument("--frontend-port", type=int, default=4173, help="Port for the monitor frontend service")
+    monitor_parser.add_argument("--detach", action="store_true", help="Start the monitor services and exit without waiting")
 
     if not arguments or arguments[0].startswith("-"):
         arguments = ["run", *arguments]
@@ -219,6 +232,94 @@ def run_normalize_metrics(config: AgentConfig, repo: str | None, run_id: str | N
         print(f"Artifacts updated: {report['updated']}")
         print(f"Diagnostics summaries removed: {report['diagnostics_removed']}")
     return 0
+
+
+def _monitor_frontend_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "monitor_frontend"
+
+
+def _npm_executable() -> str:
+    return "npm.cmd" if os.name == "nt" else "npm"
+
+
+def run_monitor_services(
+    config: AgentConfig,
+    repo: str | None,
+    recent: int,
+    backend_host: str,
+    backend_port: int,
+    frontend_host: str,
+    frontend_port: int,
+    detach: bool,
+) -> int:
+    frontend_dir = _monitor_frontend_dir()
+    if not frontend_dir.exists():
+        print(f"Monitor frontend service not found at {frontend_dir}")
+        return 1
+
+    workspace_dir = repo or config.workspace_dir
+    backend_url = f"http://{backend_host}:{backend_port}"
+    frontend_url = f"http://{frontend_host}:{frontend_port}"
+
+    backend_env = os.environ.copy()
+    backend_env["MONITOR_FRONTEND_URL"] = frontend_url
+
+    frontend_env = os.environ.copy()
+    frontend_env["VITE_MONITOR_API_BASE"] = backend_url
+
+    backend_cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "ai_code_agent.webhook:app",
+        "--host",
+        backend_host,
+        "--port",
+        str(backend_port),
+    ]
+    frontend_cmd = [
+        _npm_executable(),
+        "run",
+        "dev",
+        "--",
+        "--host",
+        frontend_host,
+        "--port",
+        str(frontend_port),
+    ]
+
+    backend_process = subprocess.Popen(backend_cmd, env=backend_env)
+    frontend_process = subprocess.Popen(frontend_cmd, cwd=str(frontend_dir), env=frontend_env)
+
+    print(f"Monitor backend API: {backend_url}/api/monitor")
+    print(f"Monitor frontend UI: {frontend_url}/?repo={workspace_dir}&recent={recent}")
+    print(f"Monitor redirect route: {backend_url}/monitor?repo={workspace_dir}&recent={recent}")
+
+    if detach:
+        print(f"Backend PID: {backend_process.pid}")
+        print(f"Frontend PID: {frontend_process.pid}")
+        return 0
+
+    try:
+        while True:
+            backend_returncode = backend_process.poll()
+            frontend_returncode = frontend_process.poll()
+            if backend_returncode is not None or frontend_returncode is not None:
+                if backend_returncode not in (None, 0):
+                    print(f"Monitor backend exited with code {backend_returncode}")
+                if frontend_returncode not in (None, 0):
+                    print(f"Monitor frontend exited with code {frontend_returncode}")
+                return 0 if backend_returncode in (None, 0) and frontend_returncode in (None, 0) else 1
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Stopping monitor services...")
+        for process in (backend_process, frontend_process):
+            if process.poll() is None:
+                process.terminate()
+        for process in (backend_process, frontend_process):
+            if process.poll() is None:
+                process.wait(timeout=10)
+        return 0
 
 
 def _print_summary_text_output(
@@ -663,6 +764,17 @@ def cli(argv: list[str] | None = None):
             getattr(args, "repo", None),
             getattr(args, "run_id", None),
             getattr(args, "json", False),
+        )
+    if args.command == "monitor":
+        return run_monitor_services(
+            config,
+            getattr(args, "repo", None),
+            getattr(args, "recent", 5),
+            getattr(args, "backend_host", "127.0.0.1"),
+            getattr(args, "backend_port", 8000),
+            getattr(args, "frontend_host", "127.0.0.1"),
+            getattr(args, "frontend_port", 4173),
+            getattr(args, "detach", False),
         )
 
     resolved_issue_description, issue_context = resolve_issue_input(args.issue, config)

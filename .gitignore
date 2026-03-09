@@ -54,6 +54,8 @@ cover/
 .idea/
 *.swp
 *.swo
+node_modules/
+monitor_frontend/dist/
 
 # Project specific
 sandbox_workspace/

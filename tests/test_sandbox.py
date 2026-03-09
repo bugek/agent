@@ -54,6 +54,36 @@ class SandboxRunnerTest(unittest.TestCase):
         self.assertEqual(kwargs["encoding"], "utf-8")
         self.assertEqual(kwargs["errors"], "replace")
 
+    def test_execute_translates_workspace_rooted_env_paths_for_docker(self) -> None:
+        command_result = subprocess.CompletedProcess(["docker"], 0, stdout="ok", stderr="")
+        workspace_dir = r"D:\work\repo"
+        env = {
+            "AI_CODE_AGENT_VISUAL_REVIEW_DIR": r"D:\work\repo\.ai-code-agent\visual-review",
+            "AI_CODE_AGENT_VISUAL_REVIEW_MANIFEST": r"D:\work\repo\.ai-code-agent\visual-review\manifest.json",
+            "AI_CODE_AGENT_PLAYWRIGHT_SCREENSHOT_DIR": r"D:\work\repo\.ai-code-agent\visual-review\screenshots",
+            "UNCHANGED_PATH": r"D:\outside\artifact.png",
+            "PLAIN_VALUE": "keep-me",
+        }
+
+        with patch("ai_code_agent.tools.sandbox.subprocess.run", return_value=command_result) as mock_run:
+            runner = SandboxRunner("demo-image", workspace_dir=workspace_dir, mode="docker")
+            runner.container_started = True
+
+            runner.execute("python -V", env=env)
+
+        docker_cmd = mock_run.call_args.args[0]
+        self.assertIn("AI_CODE_AGENT_VISUAL_REVIEW_DIR=/workspace/.ai-code-agent/visual-review", docker_cmd)
+        self.assertIn(
+            "AI_CODE_AGENT_VISUAL_REVIEW_MANIFEST=/workspace/.ai-code-agent/visual-review/manifest.json",
+            docker_cmd,
+        )
+        self.assertIn(
+            "AI_CODE_AGENT_PLAYWRIGHT_SCREENSHOT_DIR=/workspace/.ai-code-agent/visual-review/screenshots",
+            docker_cmd,
+        )
+        self.assertIn("UNCHANGED_PATH=D:\\outside\\artifact.png", docker_cmd)
+        self.assertIn("PLAIN_VALUE=keep-me", docker_cmd)
+
     def test_probe_reports_recommendation_when_docker_image_is_missing(self) -> None:
         inspect_result = subprocess.CompletedProcess(["docker", "image", "inspect"], 1, stdout="", stderr="missing")
         with patch("ai_code_agent.tools.sandbox.shutil.which", return_value="docker"), patch(

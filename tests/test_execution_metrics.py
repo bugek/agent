@@ -19,6 +19,7 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "frameworks": ["nextjs"],
                     "package_manager": "npm",
                 },
+                "plan": "Update the dashboard page safely, keep the loading state intact, and limit edits to app/page.tsx and components/panel.tsx.",
                 "files_to_edit": ["app/page.tsx", "components/panel.tsx"],
                 "patches": [
                     {"file": "app/page.tsx"},
@@ -87,6 +88,12 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "changed_areas": ["app/page.tsx", "components/panel.tsx"],
                     "validation": {"passed": ["compileall"], "failed": ["script:build"]},
                     "residual_risks": ["Smoke tests failed."],
+                    "remediation": {
+                        "required": True,
+                        "failed_validation_labels": ["script:build"],
+                        "focus_areas": ["app/page.tsx"],
+                        "guidance": ["Repair the failing build before approval."],
+                    },
                 },
                 "retry_count": 1,
                 "execution_events": [
@@ -107,6 +114,7 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["workflow"]["attempt_count"], 2)
         self.assertEqual(metrics["planning"]["candidate_file_count"], 2)
         self.assertEqual(metrics["planning"]["edit_intent_count"], 1)
+        self.assertIn("Update the dashboard page safely", metrics["planning"]["plan_summary"])
         self.assertEqual(metrics["coding"]["blocked_operation_count"], 1)
         self.assertEqual(metrics["coding"]["remediation_focus_count"], 2)
         self.assertEqual(metrics["testing"]["failed_commands"], ["script:build"])
@@ -129,7 +137,9 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["commands"][1]["duration_ms"], 980)
         self.assertEqual(metrics["testing"]["visual_review"]["missing_state_count"], 2)
         self.assertEqual(metrics["review"]["validation_failed_count"], 1)
-        self.assertEqual(metrics["review"]["remediation_required"], False)
+        self.assertEqual(metrics["review"]["remediation_required"], True)
+        self.assertEqual(metrics["review"]["remediation"]["focus_areas"], ["app/page.tsx"])
+        self.assertEqual(metrics["review"]["remediation"]["guidance"], ["Repair the failing build before approval."])
         self.assertEqual(metrics["effectiveness"]["retry_attempted"], True)
         self.assertEqual(metrics["effectiveness"]["retry_recovered"], False)
         self.assertEqual(metrics["effectiveness"]["remediation_applied"], True)

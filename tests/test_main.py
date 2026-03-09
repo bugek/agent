@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from ai_code_agent.config import AgentConfig
-from ai_code_agent.main import parse_args, run_diagnostics, run_health_check, run_normalize_metrics
+from ai_code_agent.main import parse_args, run_diagnostics, run_health_check, run_monitor_services, run_normalize_metrics
 from ai_code_agent.metrics import build_diagnostics_summary, persist_diagnostics_summary, persist_execution_metrics
 
 
@@ -53,6 +53,27 @@ class MainCliTest(unittest.TestCase):
         self.assertEqual(args.repo, "workspace")
         self.assertEqual(args.run_id, "run-123")
         self.assertTrue(args.json)
+
+    def test_parse_args_supports_monitor_command(self) -> None:
+        args = parse_args([
+            "monitor",
+            "--repo",
+            "workspace",
+            "--recent",
+            "9",
+            "--backend-port",
+            "8100",
+            "--frontend-port",
+            "5100",
+            "--detach",
+        ])
+
+        self.assertEqual(args.command, "monitor")
+        self.assertEqual(args.repo, "workspace")
+        self.assertEqual(args.recent, 9)
+        self.assertEqual(args.backend_port, 8100)
+        self.assertEqual(args.frontend_port, 5100)
+        self.assertTrue(args.detach)
 
     def test_run_diagnostics_prints_latest_metrics_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -186,6 +207,31 @@ class MainCliTest(unittest.TestCase):
         self.assertIn("Sandbox resolved mode: local", rendered)
         self.assertIn("Sandbox fallback reason: docker_image_missing", rendered)
         self.assertIn("Sandbox recommendation: Build the sandbox image with: docker build -t demo-image .", rendered)
+
+    def test_run_monitor_services_launches_processes_in_detach_mode(self) -> None:
+        output = io.StringIO()
+        backend_process = type("Proc", (), {"pid": 101, "poll": lambda self: None})()
+        frontend_process = type("Proc", (), {"pid": 202, "poll": lambda self: None})()
+
+        with patch("ai_code_agent.main.subprocess.Popen", side_effect=[backend_process, frontend_process]) as popen_mock, redirect_stdout(output):
+            exit_code = run_monitor_services(
+                AgentConfig(workspace_dir="fallback-workspace"),
+                repo="demo-workspace",
+                recent=7,
+                backend_host="127.0.0.1",
+                backend_port=8000,
+                frontend_host="127.0.0.1",
+                frontend_port=4173,
+                detach=True,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(popen_mock.call_count, 2)
+        rendered = output.getvalue()
+        self.assertIn("Monitor backend API: http://127.0.0.1:8000/api/monitor", rendered)
+        self.assertIn("Monitor frontend UI: http://127.0.0.1:4173/?repo=demo-workspace&recent=7", rendered)
+        self.assertIn("Backend PID: 101", rendered)
+        self.assertIn("Frontend PID: 202", rendered)
 
     def test_run_diagnostics_prints_recent_run_trend(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -91,6 +91,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "blocked_file_count": _count_items(planning_context.get("blocked_files_to_edit")),
             "files_to_edit_count": _count_items(state.get("files_to_edit")),
             "edit_intent_count": _count_items(planning_context.get("edit_intent")),
+            "plan_summary": _summary_text(state.get("plan")),
         },
         "coding": {
             "generated_by": codegen_summary.get("generated_by"),
@@ -137,6 +138,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "changed_area_count": _count_items(review_summary.get("changed_areas")),
             "validation_failed_count": _count_items((review_summary.get("validation") or {}).get("failed")),
             "remediation_required": bool((review_summary.get("remediation") or {}).get("required")),
+            "remediation": _review_remediation(review_summary.get("remediation")),
         },
         "create_pr": {
             "outcome": create_pr_result.get("outcome"),
@@ -172,6 +174,40 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "blocking_comment_count": _blocking_comment_count(state.get("review_comments", [])),
         },
         "phases": _phase_metrics(execution_events, started_at, state),
+    }
+
+
+def _summary_text(value: Any, limit: int = 600) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = re.sub(r"\s+", " ", value).strip()
+    if not normalized:
+        return None
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _review_remediation(remediation: Any) -> dict[str, Any] | None:
+    if not isinstance(remediation, dict):
+        return None
+    return {
+        "required": bool(remediation.get("required")),
+        "failed_validation_labels": [
+            item for item in remediation.get("failed_validation_labels", []) if isinstance(item, str) and item
+        ] if isinstance(remediation.get("failed_validation_labels"), list) else [],
+        "blocked_file_paths": [
+            item for item in remediation.get("blocked_file_paths", []) if isinstance(item, str) and item
+        ] if isinstance(remediation.get("blocked_file_paths"), list) else [],
+        "failed_operations": [
+            item for item in remediation.get("failed_operations", []) if isinstance(item, str) and item
+        ] if isinstance(remediation.get("failed_operations"), list) else [],
+        "focus_areas": [
+            item for item in remediation.get("focus_areas", []) if isinstance(item, str) and item
+        ] if isinstance(remediation.get("focus_areas"), list) else [],
+        "guidance": [
+            item for item in remediation.get("guidance", []) if isinstance(item, str) and item
+        ] if isinstance(remediation.get("guidance"), list) else [],
     }
 
 

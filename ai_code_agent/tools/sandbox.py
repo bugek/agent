@@ -2,6 +2,7 @@ import os
 import time
 import shutil
 import subprocess
+import posixpath
 
 
 def _text_run_kwargs(**overrides):
@@ -169,6 +170,7 @@ class SandboxRunner:
         try:
             if self.mode == "docker":
                 workspace = os.path.abspath(self.workspace)
+                docker_env = self._docker_environment(env, workspace)
                 docker_cmd = [
                     "docker",
                     "run",
@@ -178,8 +180,8 @@ class SandboxRunner:
                     "-w",
                     "/workspace",
                 ]
-                if env:
-                    for key, value in env.items():
+                if docker_env:
+                    for key, value in docker_env.items():
                         docker_cmd.extend(["-e", f"{key}={value}"])
                 docker_cmd.extend([
                     self.image,
@@ -215,6 +217,33 @@ class SandboxRunner:
             "duration_ms": duration_ms,
             "timed_out": timed_out,
         }
+
+    def _docker_environment(self, env: dict[str, str] | None, workspace: str) -> dict[str, str]:
+        if not env:
+            return {}
+
+        translated: dict[str, str] = {}
+        normalized_workspace = os.path.normcase(os.path.normpath(workspace))
+
+        for key, value in env.items():
+            translated[key] = self._containerize_path_value(value, workspace, normalized_workspace)
+
+        return translated
+
+    def _containerize_path_value(self, value: str, workspace: str, normalized_workspace: str) -> str:
+        if not isinstance(value, str) or not value:
+            return value
+
+        normalized_value = os.path.normcase(os.path.normpath(value))
+        workspace_prefix = normalized_workspace + os.sep
+        if normalized_value != normalized_workspace and not normalized_value.startswith(workspace_prefix):
+            return value
+
+        relative_path = os.path.relpath(os.path.normpath(value), workspace)
+        if relative_path in {".", ""}:
+            return "/workspace"
+
+        return posixpath.join("/workspace", relative_path.replace("\\", "/"))
         
     def cleanup(self):
         """Stops and removes the container."""
