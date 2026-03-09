@@ -158,6 +158,23 @@ def _finalize_result(state: AgentState, result: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _merge_patches(existing: list[dict[str, Any]] | None, new: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for patch in list(existing or []) + list(new or []):
+        if not isinstance(patch, dict):
+            continue
+        file_path = patch.get("file") if isinstance(patch.get("file"), str) else ""
+        diff = patch.get("diff") if isinstance(patch.get("diff"), str) else ""
+        operation = patch.get("operation") if isinstance(patch.get("operation"), str) else ""
+        key = (file_path, diff, operation)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(patch)
+    return merged
+
+
 def _checkpoint_progress(state: AgentState) -> AgentState:
     checkpointed = dict(state)
     checkpointed["execution_metrics"] = build_execution_metrics(checkpointed)
@@ -224,6 +241,7 @@ def code_node(state: AgentState) -> dict[str, Any]:
     llm = LLMClient.from_config(config, role="coder")
     agent = CoderAgent(config, llm)
     result = agent.run(current_state)
+    result["patches"] = _merge_patches(current_state.get("patches", []), result.get("patches", []))
     result = _with_run_identity(current_state, result)
     result["execution_log"] = _merge_logs(
         current_state,

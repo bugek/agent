@@ -72,12 +72,42 @@ class LLMClient:
                 }
             )
         if "review_approved" in combined:
-            approved = "traceback" not in combined and "error" not in combined and "failed" not in combined
-            comments = ["Fallback review completed without an LLM provider."]
-            if not approved:
-                comments = ["Fallback review detected a failure signal in the logs."]
-            return json.dumps({"review_approved": approved, "review_comments": comments})
+            return json.dumps(self._fallback_review_result(user_prompt))
         return "LLM provider not configured. Fallback response generated locally."
+
+    def _fallback_review_result(self, user_prompt: str) -> dict[str, Any]:
+        payload = self._extract_json(user_prompt) or {}
+        patch_count = payload.get("patch_count") if isinstance(payload.get("patch_count"), int) else 0
+        changed_files = payload.get("changed_files") if isinstance(payload.get("changed_files"), list) else []
+        analysis_only = bool(payload.get("analysis_only"))
+        validation_signals = payload.get("validation_signals") if isinstance(payload.get("validation_signals"), list) else []
+        visual_review = payload.get("visual_review") if isinstance(payload.get("visual_review"), dict) else None
+        test_results = str(payload.get("test_results") or "").lower()
+        codegen_summary = payload.get("codegen_summary") if isinstance(payload.get("codegen_summary"), dict) else {}
+
+        has_failed_validation = any(
+            isinstance(signal, dict) and int(signal.get("exit_code", 1)) != 0
+            for signal in validation_signals
+            if isinstance(signal, dict)
+        )
+        has_failed_operations = bool(codegen_summary.get("failed_operations"))
+        has_blocked_visual_review = False
+        if visual_review:
+            screenshot_status = visual_review.get("screenshot_status")
+            responsive_review = visual_review.get("responsive_review") if isinstance(visual_review.get("responsive_review"), dict) else {}
+            has_blocked_visual_review = screenshot_status in {"failed", "missing_artifacts"} or bool(responsive_review.get("missing_categories")) or bool(responsive_review.get("missing_viewport_metadata"))
+
+        approved = not has_failed_validation and not has_failed_operations and not has_blocked_visual_review
+        if not analysis_only and patch_count <= 0 and not changed_files:
+            approved = False
+        if "traceback" in test_results:
+            approved = False
+
+        if approved:
+            comments = ["Fallback review completed without an LLM provider."]
+        else:
+            comments = ["Fallback review detected a failure signal in the review payload."]
+        return {"review_approved": approved, "review_comments": comments}
 
     def _generate_openai_compatible(self, system_prompt: str, user_prompt: str, default_model: str) -> str:
         from openai import OpenAI
@@ -174,10 +204,10 @@ class LLMClient:
                 "files_to_edit": [],
             }
         if "review_approved" in combined:
-            return {
-                "review_approved": "traceback" not in combined and "failed" not in combined,
-                "review_comments": ["Structured fallback review completed locally."],
-            }
+            fallback = self._fallback_review_result(user_prompt)
+            if fallback.get("review_approved"):
+                fallback["review_comments"] = ["Structured fallback review completed locally."]
+            return fallback
         return schema or {}
         
     def call_with_tools(self, system_prompt: str, user_prompt: str, tools: list) -> list:

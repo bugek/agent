@@ -120,6 +120,35 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["remediation_focus_count"], 0)
         self.assertEqual(result["execution_metrics"]["coding"]["blocked_operation_count"], 1)
 
+    def test_code_node_preserves_prior_patches_when_retry_is_noop(self) -> None:
+        coder_result = {
+            "patches": [],
+            "codegen_summary": {
+                "requested_operations": 0,
+                "blocked_operations": [],
+                "failed_operations": [],
+                "generated_by": "llm",
+            },
+        }
+
+        with patch("ai_code_agent.agents.coder.CoderAgent") as mock_coder, patch(
+            "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
+        ):
+            mock_coder.return_value.run.return_value = coder_result
+            result = orchestrator.code_node(
+                {
+                    "issue_description": "retry update docs",
+                    "workspace_dir": ".",
+                    "patches": [{"file": "docs/readme.md", "diff": "..."}],
+                    "retry_count": 1,
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                }
+            )
+
+        self.assertEqual(result["patches"], [{"file": "docs/readme.md", "diff": "..."}])
+        self.assertEqual(result["execution_metrics"]["coding"]["patch_count"], 1)
+
     def test_review_node_records_summary_status_and_risks(self) -> None:
         review_result = {
             "review_approved": True,
