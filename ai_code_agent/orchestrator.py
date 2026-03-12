@@ -23,6 +23,8 @@ class AgentState(TypedDict, total=False):
     # Populated by Planner
     plan: Optional[str]
     files_to_edit: list[str]
+    scope_context: dict[str, Any]
+    analysis_context: dict[str, Any]
 
     # Populated by Coder
     patches: list[dict[str, Any]]
@@ -39,6 +41,11 @@ class AgentState(TypedDict, total=False):
     review_summary: dict[str, Any]
     execution_metrics: dict[str, Any]
     execution_metrics_path: str
+
+    # Task model (populated by planner, updated by orchestrator)
+    task_statuses: dict[str, str]
+    failed_task_ids: list[str]
+    state_validation_failed: bool
 
     # Internal Orchestrator
     run_id: str
@@ -175,6 +182,34 @@ def _merge_patches(existing: list[dict[str, Any]] | None, new: list[dict[str, An
     return merged
 
 
+def _update_task_statuses_approved(state: AgentState) -> dict[str, str]:
+    """Mark all tasks as completed when review is approved."""
+    planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+    tasks = planning_context.get("tasks") if isinstance(planning_context.get("tasks"), list) else []
+    statuses = dict(state.get("task_statuses") or {})
+    for task in tasks:
+        if isinstance(task, dict) and isinstance(task.get("id"), str):
+            statuses[task["id"]] = "completed"
+    return statuses
+
+
+def _update_task_statuses_failed(state: AgentState, failed_task_ids: list[str]) -> dict[str, str]:
+    """Mark failed tasks and keep completed ones. Tasks not in failed list with patches are completed."""
+    planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+    tasks = planning_context.get("tasks") if isinstance(planning_context.get("tasks"), list) else []
+    failed_set = set(failed_task_ids) if failed_task_ids else set()
+    statuses = dict(state.get("task_statuses") or {})
+    for task in tasks:
+        if not isinstance(task, dict) or not isinstance(task.get("id"), str):
+            continue
+        task_id = task["id"]
+        if task_id in failed_set:
+            statuses[task_id] = "failed"
+        elif statuses.get(task_id) != "completed":
+            statuses[task_id] = "completed" if not failed_set else statuses.get(task_id, "pending")
+    return statuses
+
+
 def _checkpoint_progress(state: AgentState) -> AgentState:
     checkpointed = dict(state)
     checkpointed["execution_metrics"] = build_execution_metrics(checkpointed)
@@ -186,17 +221,198 @@ def _checkpoint_progress(state: AgentState) -> AgentState:
     return checkpointed
 
 
+def _has_state_validation_failure(state: AgentState) -> bool:
+    return bool(state.get("state_validation_failed", False))
+
+
+def _path_matches_scope(file_path: str, patterns: list[str]) -> bool:
+    normalized = file_path.replace("\\", "/")
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern:
+            continue
+        normalized_pattern = pattern.replace("\\", "/").rstrip("/")
+        if normalized == normalized_pattern or normalized.startswith(normalized_pattern + "/"):
+            return True
+    return False
+
+
+def _task_target_patterns(state: AgentState) -> list[str]:
+    planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+    tasks = planning_context.get("tasks") if isinstance(planning_context.get("tasks"), list) else []
+    patterns: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        for file_path in task.get("target_files", []):
+            if isinstance(file_path, str) and file_path:
+                patterns.append(file_path.replace("\\", "/"))
+    return patterns
+
+
+def _validate_state_invariants(state: AgentState, node: str) -> list[str]:
+    errors: list[str] = []
+    scope_context = state.get("scope_context") if isinstance(state.get("scope_context"), dict) else {}
+    planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+    scope = planning_context.get("scope") if isinstance(planning_context.get("scope"), dict) else scope_context
+    in_scope = [item for item in scope.get("in_scope", []) if isinstance(item, str)] if isinstance(scope, dict) else []
+    out_of_scope = [item for item in scope.get("out_of_scope", []) if isinstance(item, str)] if isinstance(scope, dict) else []
+
+    if node == "scope":
+        overlap = sorted({item for item in in_scope if _path_matches_scope(item, out_of_scope)})
+        if overlap:
+            errors.append(f"scope overlap detected: {', '.join(overlap[:3])}")
+
+    if node == "plan":
+        files_to_edit = [item for item in state.get("files_to_edit", []) if isinstance(item, str)]
+        for file_path in files_to_edit:
+            if _path_matches_scope(file_path, out_of_scope):
+                errors.append(f"plan files_to_edit includes out_of_scope path: {file_path}")
+        task_ids: list[str] = []
+        tasks = planning_context.get("tasks") if isinstance(planning_context.get("tasks"), list) else []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("id")
+            if isinstance(task_id, str):
+                if task_id in task_ids:
+                    errors.append(f"duplicate task id: {task_id}")
+                task_ids.append(task_id)
+            for file_path in task.get("target_files", []):
+                if isinstance(file_path, str) and _path_matches_scope(file_path, out_of_scope):
+                    errors.append(f"task target_files includes out_of_scope path: {file_path}")
+
+    if node == "code":
+        patches = state.get("patches") if isinstance(state.get("patches"), list) else []
+        task_patterns = _task_target_patterns(state)
+        for patch in patches:
+            if not isinstance(patch, dict):
+                continue
+            file_path = patch.get("file")
+            if not isinstance(file_path, str) or not file_path:
+                continue
+            if _path_matches_scope(file_path, out_of_scope):
+                errors.append(f"patch touches out_of_scope path: {file_path}")
+            elif in_scope or task_patterns:
+                if not _path_matches_scope(file_path, in_scope) and not _path_matches_scope(file_path, task_patterns):
+                    errors.append(f"patch path is outside scope and task targets: {file_path}")
+
+    if node == "review":
+        valid_task_ids = {
+            task.get("id")
+            for task in (planning_context.get("tasks") if isinstance(planning_context.get("tasks"), list) else [])
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        for task_id in state.get("failed_task_ids", []):
+            if isinstance(task_id, str) and task_id not in valid_task_ids:
+                errors.append(f"failed_task_ids references unknown task: {task_id}")
+
+    return errors
+
+
+def _enforce_state_invariants(previous_state: AgentState, result: dict[str, Any], node: str) -> dict[str, Any]:
+    merged_state = dict(previous_state)
+    merged_state.update(result)
+    errors = _validate_state_invariants(merged_state, node)
+    if errors:
+        raise ValueError(f"state invariant violation after {node}: {'; '.join(errors)}")
+    return result
+
+
+def _node_failure_result(current_state: AgentState, node: str, message: str) -> dict[str, Any]:
+    result = {
+        "error_message": message,
+        "state_validation_failed": True,
+        "review_approved": False,
+        "test_passed": False,
+        "execution_log": _merge_logs(current_state, message),
+        "execution_events": _append_event(
+            current_state,
+            node,
+            "failed",
+            {
+                "failure_reason": message,
+                "failure_type": "state_invariant_violation",
+            },
+        ),
+    }
+    result = _with_run_identity(current_state, result)
+    return _finalize_result(current_state, result)
+
+
+def scope_node(state: AgentState) -> dict[str, Any]:
+    """Invokes the Scope agent."""
+    from ai_code_agent.agents.planner import ScopeAgent
+
+    started = _start_node(state, "scope")
+    current_state = _checkpoint_progress(_event_state(state, started))
+    config = AgentConfig()
+    llm = LLMClient.from_config(config, role="planner")
+    agent = ScopeAgent(config, llm)
+    result = agent.run(current_state)
+    result = _with_run_identity(current_state, result)
+    try:
+        result = _enforce_state_invariants(current_state, result, "scope")
+    except ValueError as exc:
+        return _node_failure_result(current_state, "scope", str(exc))
+    scope_context = result.get("scope_context", {}) if isinstance(result.get("scope_context"), dict) else {}
+    result["execution_log"] = _merge_logs(current_state, "Scope agent completed.")
+    result["execution_events"] = _append_event(
+        _event_state(current_state, result),
+        "scope",
+        "completed",
+        {
+            "status": scope_context.get("status"),
+            "in_scope_count": len(scope_context.get("in_scope", [])),
+            "out_of_scope_count": len(scope_context.get("out_of_scope", [])),
+            "ambiguity_count": len(scope_context.get("ambiguities", [])),
+        },
+    )
+    return _finalize_result(state, result)
+
+
+def analysis_node(state: AgentState) -> dict[str, Any]:
+    """Invokes the Analysis agent."""
+    from ai_code_agent.agents.planner import AnalysisAgent
+
+    started = _start_node(state, "analysis")
+    current_state = _checkpoint_progress(_event_state(state, started))
+    config = AgentConfig()
+    llm = LLMClient.from_config(config, role="planner")
+    agent = AnalysisAgent(config, llm)
+    result = agent.run(current_state)
+    result = _with_run_identity(current_state, result)
+    analysis_context = result.get("analysis_context", {}) if isinstance(result.get("analysis_context"), dict) else {}
+    result["execution_log"] = _merge_logs(current_state, "Analysis agent completed.")
+    result["execution_events"] = _append_event(
+        _event_state(current_state, result),
+        "analysis",
+        "completed",
+        {
+            "retrieval_strategy": analysis_context.get("retrieval_strategy"),
+            "candidate_file_count": len(analysis_context.get("candidate_files", [])),
+            "selected_skill_count": len(analysis_context.get("selected_skills", [])),
+            "blocked_skill_count": len(analysis_context.get("blocked_skills", [])),
+            "graph_seed_files": len(analysis_context.get("graph_seed_files", [])),
+        },
+    )
+    return _finalize_result(state, result)
+
+
 def plan_node(state: AgentState) -> dict[str, Any]:
     """Invokes the Planner agent."""
-    from ai_code_agent.agents.planner import PlannerAgent
+    from ai_code_agent.agents.planner import PlanAgent
 
     started = _start_node(state, "plan")
     current_state = _checkpoint_progress(_event_state(state, started))
     config = AgentConfig()
     llm = LLMClient.from_config(config, role="planner")
-    agent = PlannerAgent(config, llm)
+    agent = PlanAgent(config, llm)
     result = agent.run(current_state)
     result = _with_run_identity(current_state, result)
+    try:
+        result = _enforce_state_invariants(current_state, result, "plan")
+    except ValueError as exc:
+        return _node_failure_result(current_state, "plan", str(exc))
     planning_context = result.get("planning_context", {})
     skill_invocations = planning_context.get("skill_invocations", []) if isinstance(planning_context, dict) else []
     result["execution_log"] = _merge_logs(current_state, "Planner agent completed.")
@@ -207,6 +423,9 @@ def plan_node(state: AgentState) -> dict[str, Any]:
         {
             "files_to_edit": len(result.get("files_to_edit", [])),
             "retrieval_strategy": planning_context.get("retrieval_strategy"),
+            "task_count": len(planning_context.get("tasks", [])),
+            "scope_in_count": len((planning_context.get("scope") or {}).get("in_scope", [])),
+            "scope_out_count": len((planning_context.get("scope") or {}).get("out_of_scope", [])),
             "selected_skill_count": len(planning_context.get("selected_skills", [])),
             "selected_skills": [
                 item.get("name")
@@ -243,6 +462,10 @@ def code_node(state: AgentState) -> dict[str, Any]:
     result = agent.run(current_state)
     result["patches"] = _merge_patches(current_state.get("patches", []), result.get("patches", []))
     result = _with_run_identity(current_state, result)
+    try:
+        result = _enforce_state_invariants(current_state, result, "code")
+    except ValueError as exc:
+        return _node_failure_result(current_state, "code", str(exc))
     result["execution_log"] = _merge_logs(
         current_state,
         f"Coder agent completed with {len(result.get('patches', []))} patch(es).",
@@ -308,8 +531,17 @@ def review_node(state: AgentState) -> dict[str, Any]:
     approved = result.get("review_approved", False) and current_state.get("test_passed", False)
     if approved:
         result["retry_count"] = current_state.get("retry_count", 0)
+        result["task_statuses"] = _update_task_statuses_approved(current_state)
+        result["failed_task_ids"] = []
     else:
         result["retry_count"] = current_state.get("retry_count", 0) + 1
+        failed_task_ids = result.get("failed_task_ids") or []
+        result["task_statuses"] = _update_task_statuses_failed(current_state, failed_task_ids)
+        result["failed_task_ids"] = failed_task_ids
+    try:
+        result = _enforce_state_invariants(current_state, result, "review")
+    except ValueError as exc:
+        return _node_failure_result(current_state, "review", str(exc))
     result["execution_log"] = _merge_logs(
         current_state,
         f"Reviewer agent completed with status: {'approved' if approved else 'changes required'}.",
@@ -326,6 +558,7 @@ def review_node(state: AgentState) -> dict[str, Any]:
             "remediation_required": bool(result.get("review_summary", {}).get("remediation", {}).get("required")),
             "remediation_focus_count": len(result.get("review_summary", {}).get("remediation", {}).get("focus_areas", [])),
             "retry_recovered": approved and result.get("retry_count", current_state.get("retry_count", 0)) > 0,
+            "failed_task_ids": result.get("failed_task_ids", []),
         },
     )
     return _finalize_result(state, result)
@@ -338,12 +571,14 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
     message = "Workflow completed without creating a PR."
     created_pr_url = None
     branch_name = None
+    remote_url = None
     create_pr_result: dict[str, Any] = {
         "outcome": "skipped",
         "reason": "auto_commit_disabled" if not config.auto_commit else "no_patches",
         "provider": (current_state.get("issue_context") or {}).get("provider") if isinstance(current_state.get("issue_context"), dict) else None,
         "branch_name": None,
         "base_branch": None,
+        "remote_url": None,
         "pr_url": None,
         "message": message,
         "error": None,
@@ -358,7 +593,9 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
             issue_context,
             current_state.get("issue_description") or datetime.utcnow().strftime('%Y%m%d%H%M%S'),
         )
-        create_pr_result.update({"branch_name": branch_name, "provider": issue_context.get("provider")})
+        resolved_remote_url = git_ops.remote_url()
+        remote_url = resolved_remote_url if isinstance(resolved_remote_url, str) and resolved_remote_url else None
+        create_pr_result.update({"branch_name": branch_name, "provider": issue_context.get("provider"), "remote_url": remote_url})
         if not git_ops.is_repository():
             message = "Workflow completed, but skipped git/PR automation because the workspace is not a git repository."
             create_pr_result.update({"outcome": "skipped", "reason": "non_git_workspace"})
@@ -381,7 +618,7 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
                     message = f"Prepared branch {branch_name}, but failed to bootstrap remote base branch {base_branch}."
                     create_pr_result.update({"outcome": "failed", "reason": "base_branch_bootstrap_failed"})
                 elif git_ops.push_branch(branch_name):
-                    create_pr_result = create_remote_pr(current_state, config, branch_name=branch_name)
+                    create_pr_result = create_remote_pr(current_state, config, branch_name=branch_name, remote_url=remote_url)
                     created_pr_url = create_pr_result.get("pr_url") if isinstance(create_pr_result.get("pr_url"), str) else None
                     message = create_pr_result.get("message") or message
                 else:
@@ -414,6 +651,7 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
                 "outcome": create_pr_result.get("outcome"),
                 "reason": create_pr_result.get("reason"),
                 "base_branch": create_pr_result.get("base_branch"),
+                "remote_url": create_pr_result.get("remote_url"),
                 "error": create_pr_result.get("error"),
             },
         ),
@@ -425,6 +663,8 @@ def create_pr_node(state: AgentState) -> dict[str, Any]:
 
 def should_continue(state: AgentState) -> str:
     """Routing logic after a review or test."""
+    if _has_state_validation_failure(state):
+        return "fail"
     if state["review_approved"] and state["test_passed"]:
         return "create_pr"
 
@@ -435,7 +675,23 @@ def should_continue(state: AgentState) -> str:
     if state["retry_count"] >= AgentConfig().max_retries:
         return "fail"
 
-    return "code"
+    return "plan"
+
+
+def should_continue_after_scope(state: AgentState) -> str:
+    return "fail" if _has_state_validation_failure(state) else "analysis"
+
+
+def should_continue_after_analysis(state: AgentState) -> str:
+    return "fail" if _has_state_validation_failure(state) else "plan"
+
+
+def should_continue_after_plan(state: AgentState) -> str:
+    return "fail" if _has_state_validation_failure(state) else "code"
+
+
+def should_continue_after_code(state: AgentState) -> str:
+    return "fail" if _has_state_validation_failure(state) else "test"
 
 
 class LocalCompiledGraph:
@@ -443,6 +699,8 @@ class LocalCompiledGraph:
 
     def __init__(self):
         self.nodes = {
+            "scope": scope_node,
+            "analysis": analysis_node,
             "plan": plan_node,
             "code": code_node,
             "test": test_node,
@@ -456,10 +714,18 @@ class LocalCompiledGraph:
         return merged
 
     def _next_node(self, current: str, state: AgentState) -> str:
+        if current == "scope":
+            route = should_continue_after_scope(state)
+            return END if route == "fail" else route
+        if current == "analysis":
+            route = should_continue_after_analysis(state)
+            return END if route == "fail" else route
         if current == "plan":
-            return "code"
+            route = should_continue_after_plan(state)
+            return END if route == "fail" else route
         if current == "code":
-            return "test"
+            route = should_continue_after_code(state)
+            return END if route == "fail" else route
         if current == "test":
             return "review"
         if current == "review":
@@ -470,7 +736,7 @@ class LocalCompiledGraph:
         return END
 
     def invoke(self, state: AgentState) -> AgentState:
-        current = "plan"
+        current = "scope"
         current_state = dict(state)
         while current != END:
             delta = self.nodes[current](current_state)
@@ -479,7 +745,7 @@ class LocalCompiledGraph:
         return current_state
 
     def stream(self, state: AgentState):
-        current = "plan"
+        current = "scope"
         current_state = dict(state)
         while current != END:
             delta = self.nodes[current](current_state)
@@ -494,14 +760,18 @@ def build_graph():
         return LocalCompiledGraph()
 
     workflow = StateGraph(AgentState)
+    workflow.add_node("scope", scope_node)
+    workflow.add_node("analysis", analysis_node)
     workflow.add_node("plan", plan_node)
     workflow.add_node("code", code_node)
     workflow.add_node("test", test_node)
     workflow.add_node("review", review_node)
     workflow.add_node("create_pr", create_pr_node)
-    workflow.set_entry_point("plan")
-    workflow.add_edge("plan", "code")
-    workflow.add_edge("code", "test")
+    workflow.set_entry_point("scope")
+    workflow.add_conditional_edges("scope", should_continue_after_scope, {"analysis": "analysis", "fail": END})
+    workflow.add_conditional_edges("analysis", should_continue_after_analysis, {"plan": "plan", "fail": END})
+    workflow.add_conditional_edges("plan", should_continue_after_plan, {"code": "code", "fail": END})
+    workflow.add_conditional_edges("code", should_continue_after_code, {"test": "test", "fail": END})
     workflow.add_edge("test", "review")
     workflow.add_conditional_edges(
         "review",

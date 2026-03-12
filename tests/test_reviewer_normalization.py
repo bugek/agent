@@ -15,6 +15,26 @@ class StubLLM:
 
 
 class ReviewerNormalizationTest(unittest.TestCase):
+    def test_visual_review_phrase_is_not_treated_as_analysis_only(self) -> None:
+        reviewer = ReviewerAgent(
+            AgentConfig(workspace_dir="."),
+            StubLLM({"review_comments": [], "review_approved": True}),
+        )
+
+        result = reviewer.run(
+            {
+                "issue_description": "Build, typecheck, and visual-review flows continue to pass while adding React Flow.",
+                "workspace_dir": ".",
+                "patches": [],
+                "test_passed": True,
+                "test_results": "compileall(exit=0):\n",
+                "codegen_summary": {},
+            }
+        )
+
+        self.assertFalse(result["review_approved"])
+        self.assertIn("No code changes were produced for a change-oriented request.", result["review_comments"])
+
     def test_string_review_comment_is_wrapped_as_single_list_item(self) -> None:
         reviewer = ReviewerAgent(
             AgentConfig(workspace_dir="."),

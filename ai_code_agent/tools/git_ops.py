@@ -37,6 +37,13 @@ class GitOps:
         result = self._run(["ls-remote", "--heads", "origin", f"refs/heads/{branch_name}"])
         return result.returncode == 0 and bool(result.stdout.strip())
 
+    def remote_url(self, remote_name: str = "origin") -> str | None:
+        result = self._run(["remote", "get-url", remote_name])
+        if result.returncode != 0:
+            return None
+        remote_url = result.stdout.strip()
+        return remote_url or None
+
     def branches_share_history(self, base_branch: str, branch_name: str) -> bool:
         result = self._run(["merge-base", base_branch, branch_name])
         return result.returncode == 0 and bool(result.stdout.strip())

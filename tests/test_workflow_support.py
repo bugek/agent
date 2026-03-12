@@ -169,6 +169,28 @@ class WorkflowSupportTest(unittest.TestCase):
         self.assertEqual(result["reason"], "github_http_422")
         self.assertIn("branch has no history in common", result["error"])
 
+    def test_create_remote_pr_for_github_skips_when_remote_is_not_github_repo(self) -> None:
+        client = Mock()
+        state = {
+            "issue_context": {"provider": "github", "repo": "octo/repo", "issue_number": 42, "title": "Fix flaky validation"},
+            "run_id": "run-123",
+            "patches": [{"file": "x"}],
+            "retry_count": 0,
+        }
+
+        result = create_remote_pr(
+            state,
+            AgentConfig(github_token="token", github_base_branch="main"),
+            branch_name="ai-code-agent/gh-42-fix-flaky-validation",
+            remote_url=r"D:\work\next-test-agent-live",
+            github_client=client,
+        )
+
+        self.assertEqual(result["outcome"], "skipped")
+        self.assertEqual(result["reason"], "remote_not_github_repo")
+        client.find_open_pull_request.assert_not_called()
+        client.create_pull_request.assert_not_called()
+
     def test_create_remote_pr_for_azure_comments_on_work_item(self) -> None:
         client = Mock()
         client.create_pull_request.return_value = "https://dev.azure.com/demo/project/_git/repo/pullrequest/5"

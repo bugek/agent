@@ -33,6 +33,17 @@ type PlanningMetrics = {
   available_skill_count?: number | null;
   selected_skill_count?: number | null;
   selected_skills?: string[];
+  task_failed_ids?: string[];
+  tasks?: MonitorTask[];
+};
+
+type MonitorTask = {
+  id?: string | null;
+  title?: string | null;
+  goal?: string | null;
+  status?: string | null;
+  target_files?: string[];
+  acceptance_checks?: string[];
 };
 
 type PhaseMetrics = {
@@ -74,15 +85,25 @@ type MonitorRow = {
   path?: string;
 };
 
+type BlockerTypeRetryBreakdownItem = {
+  label?: string;
+  run_count?: number;
+  recovered_count?: number;
+  recovery_rate?: number;
+};
+
+type TrendMetrics = {
+  run_count?: number;
+  success_rate?: number;
+  blocker_type_retry_breakdown?: BlockerTypeRetryBreakdownItem[];
+};
+
 type MonitorResponse = {
   workspace_dir?: string;
   latest?: LatestMetrics;
   latest_path?: string | null;
   phase_details?: Record<string, PhaseDetail>;
-  trend?: {
-    run_count?: number;
-    success_rate?: number;
-  };
+  trend?: TrendMetrics;
   rows?: MonitorRow[];
   generated_at?: string;
 };
@@ -95,6 +116,7 @@ type PhaseDetail = {
   highlights?: string[];
   skills?: PlanningSkill[];
   blocked_skills?: PlanningSkill[];
+  tasks?: MonitorTask[];
   artifacts?: PhaseArtifact[];
   images?: PhaseImage[];
 };
@@ -114,7 +136,7 @@ type PhaseImage = {
   url?: string;
 };
 
-const phaseNames = ['plan', 'code', 'test', 'review', 'create_pr'];
+const phaseNames = ['scope', 'analysis', 'plan', 'code', 'test', 'review', 'create_pr'];
 const defaultRepo = 'D:\\work\\next-test-agent-live-issue7-rerun4';
 
 function initialQueryState(): { repo: string; recent: string } {
@@ -128,6 +150,8 @@ function initialQueryState(): { repo: string; recent: string } {
 }
 
 const phaseTitles: Record<string, string> = {
+  scope: 'Scope agent',
+  analysis: 'Analysis agent',
   plan: 'Planner agent',
   code: 'Coder agent',
   test: 'Tester agent',
@@ -214,6 +238,12 @@ function statusTone(status?: string | null): string {
 }
 
 function phaseSummary(phaseName: string, status: string, workflow: WorkflowMetrics, failures: FailureMetrics, testing: TestingMetrics): string {
+  if (phaseName === 'scope') {
+    return `The scope step narrows the requested change into safe boundaries before analysis and planning begin. Current scope status is ${status}.`;
+  }
+  if (phaseName === 'analysis') {
+    return `The analysis step gathers repository evidence, candidate files, and retrieval signals before the concrete plan is built. Current analysis status is ${status}.`;
+  }
   if (phaseName === 'plan') {
     return `The planner reads the issue, profiles the workspace, and decides which files or intents the rest of the run should focus on. Current planner status is ${status}.`;
   }
@@ -233,6 +263,20 @@ function phaseSummary(phaseName: string, status: string, workflow: WorkflowMetri
 }
 
 function phaseHighlights(phaseName: string, status: string, workflow: WorkflowMetrics, failures: FailureMetrics, testing: TestingMetrics): string[] {
+  if (phaseName === 'scope') {
+    return [
+      'Defines in-scope and out-of-scope boundaries for the run.',
+      'Helps prevent unsafe edits before planning or code generation starts.',
+      `Current workflow status is ${asText(workflow.status)}.`,
+    ];
+  }
+  if (phaseName === 'analysis') {
+    return [
+      'Collects candidate files, retrieval evidence, and workspace signals.',
+      'Feeds retrieval context and graph seeds into the planning phase.',
+      `Active workflow node is ${asText(workflow.active_node || workflow.terminal_node)}.`,
+    ];
+  }
   if (phaseName === 'plan') {
     return [
       'Reads issue context and repository profile.',
@@ -281,7 +325,7 @@ function App() {
   const [data, setData] = useState<MonitorResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedPhase, setSelectedPhase] = useState<string>('plan');
+  const [selectedPhase, setSelectedPhase] = useState<string>('scope');
   const [selectedTextArtifact, setSelectedTextArtifact] = useState<PhaseArtifact | null>(null);
   const [selectedTextArtifactContent, setSelectedTextArtifactContent] = useState<string>('');
   const [selectedTextArtifactError, setSelectedTextArtifactError] = useState<string | null>(null);
@@ -358,7 +402,7 @@ function App() {
       if (current && phaseNames.includes(current)) {
         return current;
       }
-      return (activeNode && phaseNames.includes(activeNode)) ? activeNode : 'plan';
+      return (activeNode && phaseNames.includes(activeNode)) ? activeNode : 'scope';
     });
   }, [activeNode, latest.run_id]);
 
@@ -424,8 +468,9 @@ function App() {
   });
 
   const recentRuns = data?.rows || [];
+  const blockerTypeRetryBreakdown = data?.trend?.blocker_type_retry_breakdown || [];
   const events = latest.execution_events || [];
-  const selectedPhaseName = phaseNames.includes(selectedPhase) ? selectedPhase : (activeNode && phaseNames.includes(activeNode) ? activeNode : 'plan');
+  const selectedPhaseName = phaseNames.includes(selectedPhase) ? selectedPhase : (activeNode && phaseNames.includes(activeNode) ? activeNode : 'scope');
   const selectedPhaseMetrics = phaseMetrics[selectedPhaseName] || {};
   const selectedPhaseStatus = asText(selectedPhaseMetrics.status || 'not_run');
   const selectedPhaseEvents = events.filter((event) => event.node === selectedPhaseName).slice().reverse();
@@ -440,7 +485,9 @@ function App() {
   const selectedPhaseBlockedSkills = selectedPhaseDetail.blocked_skills || [];
   const selectedPhaseArtifacts = selectedPhaseDetail.artifacts || [];
   const selectedPhaseImages = selectedPhaseDetail.images || [];
+  const selectedPhaseTasks = selectedPhaseDetail.tasks || [];
   const selectedSkillNames = planning.selected_skills || [];
+  const planningTasks = planning.tasks || [];
   const selectedTextArtifactLines = selectedTextArtifactContent ? selectedTextArtifactContent.split(/\r?\n/) : [];
   const selectedTextArtifactQueryValue = selectedTextArtifactQuery.trim().toLowerCase();
   const selectedTextArtifactFilteredLines = selectedTextArtifactQueryValue
@@ -724,6 +771,26 @@ function App() {
                 ) : <div className="empty-state">No planner skills were blocked for this run.</div>}
               </article>
             ) : null}
+            {(selectedPhaseName === 'plan' || selectedPhaseName === 'review') ? (
+              <article className="detail-card detail-card--full">
+                <div className="detail-label">Tasks in scope</div>
+                {selectedPhaseTasks.length ? (
+                  <div className="stack-list">
+                    {selectedPhaseTasks.map((task) => (
+                      <article className="list-card" key={`${task.id}-${task.title}`}>
+                        <div className="list-title-row">
+                          <strong>{asText(task.id)} · {asText(task.title)}</strong>
+                          <span className={`status-chip status-${statusTone(task.status)}`}>{asText(task.status)}</span>
+                        </div>
+                        {task.goal ? <div className="list-meta">{task.goal}</div> : null}
+                        {task.target_files?.length ? <div className="list-path">{task.target_files.slice(0, 4).join(', ')}</div> : null}
+                        {task.acceptance_checks?.length ? <div className="tag-row"><span className="tag">Checks {task.acceptance_checks.join(', ')}</span></div> : null}
+                      </article>
+                    ))}
+                  </div>
+                ) : <div className="empty-state">No task list was captured for this step.</div>}
+              </article>
+            ) : null}
             {selectedPhaseArtifacts.length ? (
               <article className="detail-card detail-card--full">
                 <div className="detail-label">Artifacts for this step</div>
@@ -829,6 +896,68 @@ function App() {
         </section>
 
         <aside className="sidebar-grid">
+          <section className="surface-panel">
+            <div className="panel-header">
+              <div>
+                <div className="eyebrow">Task tracker</div>
+                <h2>Implementation tasks</h2>
+              </div>
+              <div className="micro-copy">{planningTasks.length} tasks</div>
+            </div>
+            <div className="stack-list">
+              {planningTasks.length ? planningTasks.map((task) => (
+                <article className="list-card" key={task.id || task.title || 'task'}>
+                  <div className="list-title-row">
+                    <strong>{asText(task.id)} · {asText(task.title)}</strong>
+                    <span className={`status-chip status-${statusTone(task.status)}`}>{asText(task.status)}</span>
+                  </div>
+                  {task.goal ? <div className="list-meta">{task.goal}</div> : null}
+                  {task.target_files?.length ? <div className="list-path">Targets {task.target_files.slice(0, 3).join(', ')}</div> : null}
+                  {task.acceptance_checks?.length ? <div className="tag-row"><span className="tag">Checks {task.acceptance_checks.join(', ')}</span></div> : null}
+                </article>
+              )) : <div className="empty-state">No implementation tasks were captured for the latest run.</div>}
+            </div>
+          </section>
+
+          <section className="surface-panel">
+            <div className="panel-header">
+              <div>
+                <div className="eyebrow">Targeted retry</div>
+                <h2>Blocker breakdown</h2>
+              </div>
+              <div className="micro-copy">Recent window</div>
+            </div>
+            <p className="panel-summary">
+              Usage and recovery for blocker-derived retry labels across the recent run window. This mirrors the diagnose trend so you can compare precision retries directly in the dashboard.
+            </p>
+            {blockerTypeRetryBreakdown.length ? (
+              <div className="breakdown-list">
+                {blockerTypeRetryBreakdown.map((item) => {
+                  const label = asText(item.label);
+                  const runCount = item.run_count ?? 0;
+                  const recoveredCount = item.recovered_count ?? 0;
+                  const recoveryRate = item.recovery_rate ?? 0;
+                  const width = Math.max(8, Math.round(Math.max(0, Math.min(1, recoveryRate)) * 100));
+                  return (
+                    <article className="breakdown-card" key={label}>
+                      <div className="list-title-row">
+                        <strong>{label}</strong>
+                        <span className="tag">{formatRate(recoveryRate)} recovery</span>
+                      </div>
+                      <div className="breakdown-meta">
+                        <span>Runs {runCount}</span>
+                        <span>Recovered {recoveredCount}</span>
+                      </div>
+                      <div className="breakdown-bar" aria-hidden="true">
+                        <span className="breakdown-bar__fill" style={{ width: `${width}%` }} />
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : <div className="empty-state">No blocker-type targeted retry data in the recent run window.</div>}
+          </section>
+
           <section className="surface-panel">
             <div className="panel-header">
               <div>

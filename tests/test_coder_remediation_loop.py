@@ -28,6 +28,15 @@ class CapturingCoderLLM:
 
 
 class CoderRemediationLoopTest(unittest.TestCase):
+    def test_visual_review_phrase_does_not_trigger_analysis_only(self) -> None:
+        coder = CoderAgent(AgentConfig(workspace_dir="."), CapturingCoderLLM())
+
+        self.assertFalse(
+            coder._is_analysis_only(
+                "Build, typecheck, and visual-review flows continue to pass while adding a React Flow page."
+            )
+        )
+
     def test_retry_path_uses_llm_with_remediation_context_instead_of_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -62,6 +71,14 @@ class CoderRemediationLoopTest(unittest.TestCase):
                             "failed_operations": [],
                             "focus_areas": ["app/dashboard/page.tsx"],
                             "guidance": ["Fix the failing dashboard render path."],
+                            "task_remediation": [
+                                {
+                                    "task_id": "T2",
+                                    "blocker_types": ["validation_failure"],
+                                    "focus_areas": ["app/dashboard/page.tsx"],
+                                    "guidance": ["Repair the dashboard task before retrying."],
+                                }
+                            ],
                         },
                     },
                     "testing_summary": {"failed_commands": ["script:test"], "total_duration_ms": 10},
@@ -84,6 +101,7 @@ class CoderRemediationLoopTest(unittest.TestCase):
                 llm.payload["remediation"]["focus_areas"],
                 ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"],
             )
+            self.assertEqual(llm.payload["remediation"]["task_remediation"][0]["task_id"], "T2")
             self.assertEqual(llm.payload["files"][0]["file_path"], "app/dashboard/page.tsx")
             self.assertIn("Retry fix", (workspace / "app/dashboard/page.tsx").read_text(encoding="utf-8"))
 
@@ -163,6 +181,52 @@ class CoderRemediationLoopTest(unittest.TestCase):
             self.assertEqual(result["operation"], "write_file")
             self.assertIn("Updated", target.read_text(encoding="utf-8"))
 
+    def test_llm_package_json_write_is_normalized_before_apply(self) -> None:
+        class PackageJsonLLM:
+            def generate_json(self, system_prompt: str, user_prompt: str, schema: dict | None = None) -> dict:
+                return {
+                    "operations": [
+                        {
+                            "type": "write_file",
+                            "file_path": "package.json",
+                            "content": '{\n  "name": "next-test-agent",\n  "scripts": {"visual-review": "next build"},\n  "dependencies": {\n    "next": "latest",\n    "react": "latest",\n    "react-dom": "latest",\n    "reactflow": "^11.11.4",\n    "reactflow": "^11.11.4"\n  },\n  "devDependencies": {\n    "typescript": "latest"\n  }\n}',
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "smartfarm-dashboard",
+                        "scripts": {"visual-review": "node scripts/visual-review.mjs"},
+                        "dependencies": {"next": "16.1.6", "react": "18.3.1", "react-dom": "18.3.1"},
+                        "devDependencies": {"typescript": "5.6.3"},
+                    },
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+
+            coder = CoderAgent(AgentConfig(workspace_dir=temp_dir), PackageJsonLLM())
+            result = coder.run(
+                {
+                    "issue_description": "add react flow workspace",
+                    "workspace_dir": temp_dir,
+                    "files_to_edit": ["package.json"],
+                    "plan": "Update package metadata.",
+                    "planning_context": {},
+                }
+            )
+
+            self.assertEqual(len(result["patches"]), 1)
+            package_data = json.loads((workspace / "package.json").read_text(encoding="utf-8"))
+            self.assertEqual(package_data["dependencies"]["reactflow"], "^11.11.4")
+            self.assertEqual(package_data["dependencies"]["next"], "16.1.6")
+            self.assertEqual(package_data["name"], "smartfarm-dashboard")
+            self.assertEqual(package_data["scripts"]["visual-review"], "node scripts/visual-review.mjs")
+
     def test_retry_context_expands_nextjs_route_bundle_focus_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -198,6 +262,42 @@ class CoderRemediationLoopTest(unittest.TestCase):
             )
 
             self.assertEqual(context["focus_areas"], ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"])
+
+    def test_retry_scaffold_does_not_touch_package_json_without_explicit_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "app/github").mkdir(parents=True)
+            (workspace / "app/github/page.tsx").write_text("export default function Page() { return null; }\n", encoding="utf-8")
+            (workspace / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "smartfarm-dashboard",
+                        "version": "0.1.0",
+                        "dependencies": {"next": "16.1.6", "react": "18.3.1", "react-dom": "18.3.1"},
+                    },
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+
+            coder = CoderAgent(AgentConfig(workspace_dir=temp_dir), CapturingCoderLLM())
+            operations = coder._build_nextjs_operations(
+                {
+                    "issue_description": "Add graph views and React Flow workspace",
+                    "workspace_dir": temp_dir,
+                    "files_to_edit": ["app/github/page.tsx", "components/graph/GraphWorkspace.tsx"],
+                    "planning_context": {
+                        "scope": {"in_scope": ["app/github/page.tsx", "components/graph/GraphWorkspace.tsx"], "out_of_scope": []},
+                        "tasks": [{"id": "T2", "target_files": ["app/github/page.tsx", "components/graph/GraphWorkspace.tsx"]}],
+                    },
+                },
+                {
+                    "nextjs": {"router_type": "app", "app_dir": "app", "pages_dir": None, "component_directories": ["components"]}
+                },
+                FileEditor(temp_dir),
+            )
+
+            self.assertNotIn("package.json", {operation["file_path"] for operation in operations})
 
 
 if __name__ == "__main__":

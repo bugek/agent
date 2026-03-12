@@ -125,6 +125,8 @@ class TesterAgent(BaseAgent):
             "selected_command_labels": validation_plan.get("selected_labels", []) if isinstance(validation_plan, dict) else [],
             "skipped_command_labels": validation_plan.get("skipped_labels", []) if isinstance(validation_plan, dict) else [],
             "requested_retry_labels": validation_plan.get("requested_retry_labels", []) if isinstance(validation_plan, dict) else [],
+            "blocker_type_retry_used": bool(validation_plan.get("blocker_type_retry_used", False)) if isinstance(validation_plan, dict) else False,
+            "blocker_type_retry_labels": validation_plan.get("blocker_type_retry_labels", []) if isinstance(validation_plan, dict) else [],
             "retry_policy_reason": validation_plan.get("policy_reason") if isinstance(validation_plan, dict) else None,
             "retry_policy_history_source": validation_plan.get("history_source") if isinstance(validation_plan, dict) else None,
             "retry_policy_confidence": validation_plan.get("policy_confidence") if isinstance(validation_plan, dict) else None,
@@ -158,6 +160,8 @@ class TesterAgent(BaseAgent):
             "selected_labels": selected_labels,
             "skipped_labels": skipped_labels,
             "requested_retry_labels": requested_retry_labels,
+            "blocker_type_retry_used": bool(selection.get("blocker_type_retry_used", False)),
+            "blocker_type_retry_labels": selection.get("blocker_type_retry_labels", []),
             "policy_reason": selection.get("policy_reason"),
             "history_source": selection.get("history_source"),
             "policy_confidence": selection.get("policy_confidence"),
@@ -194,21 +198,28 @@ class TesterAgent(BaseAgent):
         if not remediation.get("required"):
             return self._selection_result(full_commands, [], "remediation_not_required", None, None, False, None)
 
-        requested_labels = list(
-            dict.fromkeys(
-                [
-                    label
-                    for label in remediation.get("failed_validation_labels", [])
-                    if isinstance(label, str) and label
-                ]
-                + [
-                    label
-                    for label in (state.get("testing_summary") or {}).get("failed_commands", [])
-                    if isinstance(label, str) and label
-                ]
-                + self._visual_retry_labels(state, full_commands)
+        blocker_requested_labels = self._blocker_type_retry_labels(remediation, full_commands)
+        visual_requested_labels = self._visual_retry_labels(state, full_commands)
+        if blocker_requested_labels:
+            requested_labels = blocker_requested_labels + [
+                label for label in visual_requested_labels if label not in blocker_requested_labels
+            ]
+        else:
+            requested_labels = list(
+                dict.fromkeys(
+                    [
+                        label
+                        for label in remediation.get("failed_validation_labels", [])
+                        if isinstance(label, str) and label
+                    ]
+                    + [
+                        label
+                        for label in (state.get("testing_summary") or {}).get("failed_commands", [])
+                        if isinstance(label, str) and label
+                    ]
+                    + visual_requested_labels
+                )
             )
-        )
         if not requested_labels:
             return self._selection_result(full_commands, [], "no_retry_signals", None, None, False, None)
 
@@ -269,10 +280,10 @@ class TesterAgent(BaseAgent):
         if package_install is not None and needs_install:
             selected.insert(0, package_install)
 
-        policy_reason = "default_targeted_retry"
+        policy_reason = "blocker_type_targeted_retry" if blocker_requested_labels else "default_targeted_retry"
         if history_profile.get("preferred_strategy") == "targeted_retry":
             policy_reason = "history_prefers_targeted_retry"
-        return self._selection_result(
+        result = self._selection_result(
             selected,
             requested_labels,
             policy_reason,
@@ -281,6 +292,9 @@ class TesterAgent(BaseAgent):
             bool(history_profile.get("stop_after_failure", False)),
             history_profile.get("stop_reason"),
         )
+        result["blocker_type_retry_used"] = bool(blocker_requested_labels)
+        result["blocker_type_retry_labels"] = blocker_requested_labels
+        return result
 
     def _selection_result(
         self,
@@ -295,6 +309,8 @@ class TesterAgent(BaseAgent):
         return {
             "commands": commands,
             "requested_retry_labels": requested_retry_labels,
+            "blocker_type_retry_used": False,
+            "blocker_type_retry_labels": [],
             "policy_reason": policy_reason,
             "history_source": history_source,
             "policy_confidence": policy_confidence,
@@ -455,8 +471,51 @@ class TesterAgent(BaseAgent):
             if label in {"script:visual-review", "script:screenshot", "script:test:visual"}
         ]
 
+    def _blocker_type_retry_labels(
+        self,
+        remediation: dict[str, Any],
+        full_commands: list[tuple[str, str, int, dict[str, str] | None]],
+    ) -> list[str]:
+        task_remediation = remediation.get("task_remediation") if isinstance(remediation.get("task_remediation"), list) else []
+        blocker_types: list[str] = []
+        for item in task_remediation:
+            if not isinstance(item, dict):
+                continue
+            for blocker_type in item.get("blocker_types", []):
+                if isinstance(blocker_type, str) and blocker_type and blocker_type not in blocker_types:
+                    blocker_types.append(blocker_type)
+
+        if not blocker_types:
+            return []
+
+        available_labels = [label for label, _, _, _ in full_commands]
+        requested: list[str] = []
+        for blocker_type in blocker_types:
+            for label in self._labels_for_blocker_type(blocker_type, available_labels):
+                if label not in requested:
+                    requested.append(label)
+        return requested
+
+    def _labels_for_blocker_type(self, blocker_type: str, available_labels: list[str]) -> list[str]:
+        label_groups = {
+            "type_error": ["script:typecheck", "typescript:noEmit", "typescript:build-check"],
+            "build_breakage": ["script:build", "next:build", "nest:build", "compileall"],
+            "test_failure": ["script:test"],
+            "lint_failure": ["script:lint", "next:lint"],
+            "missing_state_coverage": ["script:visual-review", "script:screenshot", "script:test:visual"],
+            "missing_responsive_coverage": ["script:visual-review", "script:screenshot", "script:test:visual"],
+            "visual_artifact_failure": ["script:visual-review", "script:screenshot", "script:test:visual"],
+        }
+        return [label for label in label_groups.get(blocker_type, []) if label in available_labels]
+
     def _install_command(self, state: AgentState, workspace_profile: dict) -> str | None:
-        if not workspace_profile.get("needs_install"):
+        manifest_changed = self._package_manifest_changed(state)
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        version_resolution = planning_context.get("version_resolution") if isinstance(planning_context.get("version_resolution"), dict) else {}
+        dependency_upgrade_requested = bool(
+            version_resolution.get("dependency_upgrade_request") or is_dependency_upgrade_request(state.get("issue_description", ""))
+        )
+        if not workspace_profile.get("needs_install") and not manifest_changed and not dependency_upgrade_requested:
             return None
 
         package_manager = workspace_profile.get("package_manager") or "npm"
@@ -465,12 +524,28 @@ class TesterAgent(BaseAgent):
         if package_manager == "yarn":
             return "yarn install --frozen-lockfile"
         if workspace_profile.get("package_manager") == "npm":
-            planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
-            version_resolution = planning_context.get("version_resolution") if isinstance(planning_context.get("version_resolution"), dict) else {}
-            if version_resolution.get("dependency_upgrade_request") or is_dependency_upgrade_request(state.get("issue_description", "")):
+            if dependency_upgrade_requested:
+                return "npm install"
+            if manifest_changed:
                 return "npm install"
             return "npm ci" if "package-lock.json" in workspace_profile.get("lockfiles", []) else "npm install"
         return "npm install"
+
+    def _package_manifest_changed(self, state: AgentState) -> bool:
+        changed_files = {
+            patch.get("file")
+            for patch in state.get("patches", [])
+            if isinstance(patch, dict) and isinstance(patch.get("file"), str)
+        }
+        if {"package.json", "package-lock.json"}.intersection(changed_files):
+            return True
+
+        files_to_edit = {
+            file_path
+            for file_path in state.get("files_to_edit", [])
+            if isinstance(file_path, str)
+        }
+        return bool({"package.json", "package-lock.json"}.intersection(files_to_edit))
 
     def _run_script_command(self, workspace_profile: dict, script_name: str) -> str:
         package_manager = workspace_profile.get("package_manager") or "npm"

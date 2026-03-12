@@ -11,7 +11,7 @@ from uuid import uuid4
 
 
 ISO_SUFFIX = "Z"
-PHASE_ORDER = ["plan", "code", "test", "review", "create_pr"]
+PHASE_ORDER = ["scope", "analysis", "plan", "code", "test", "review", "create_pr"]
 EXECUTION_RUNS_ROOT = Path(".ai-code-agent") / "runs"
 EXECUTION_METRICS_FILE = "metrics.json"
 DIAGNOSTICS_ROOT = Path(".ai-code-agent") / "diagnostics"
@@ -99,6 +99,11 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "blocked_skill_details": _planning_skill_details(planning_context.get("blocked_skills")),
             "skill_invocation_count": len(_planning_skill_invocations(planning_context)),
             "edit_intent_count": _count_items(planning_context.get("edit_intent")),
+            "task_count": _count_items(planning_context.get("tasks")),
+            "tasks": _planning_tasks(planning_context.get("tasks"), state.get("task_statuses")),
+            "task_failed_ids": [tid for tid in (state.get("failed_task_ids") or []) if isinstance(tid, str)],
+            "scope_in_count": _count_items((planning_context.get("scope") or {}).get("in_scope") if isinstance(planning_context.get("scope"), dict) else None),
+            "scope_out_count": _count_items((planning_context.get("scope") or {}).get("out_of_scope") if isinstance(planning_context.get("scope"), dict) else None),
             "plan_summary": _summary_text(state.get("plan")),
         },
         "skills": {
@@ -148,6 +153,10 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "requested_retry_labels": [
                 label for label in testing_summary.get("requested_retry_labels", []) if isinstance(label, str) and label
             ] if isinstance(testing_summary.get("requested_retry_labels"), list) else [],
+            "blocker_type_retry_used": bool(testing_summary.get("blocker_type_retry_used", False)),
+            "blocker_type_retry_labels": [
+                label for label in testing_summary.get("blocker_type_retry_labels", []) if isinstance(label, str) and label
+            ] if isinstance(testing_summary.get("blocker_type_retry_labels"), list) else [],
             "command_reduction_rate": _command_reduction_rate(testing_summary),
             "visual_review": _visual_review_metrics(visual_review),
         },
@@ -159,6 +168,7 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "changed_area_count": _count_items(review_summary.get("changed_areas")),
             "validation_failed_count": _count_items((review_summary.get("validation") or {}).get("failed")),
             "remediation_required": bool((review_summary.get("remediation") or {}).get("required")),
+            "failed_task_ids": [tid for tid in (state.get("failed_task_ids") or review_summary.get("failed_task_ids") or []) if isinstance(tid, str)],
             "remediation": _review_remediation(review_summary.get("remediation")),
         },
         "create_pr": {
@@ -179,8 +189,14 @@ def build_execution_metrics(state: dict[str, Any]) -> dict[str, Any]:
             "edit_intent_used": _count_items(planning_context.get("edit_intent")) > 0,
             "edit_intent_recovered": _count_items(planning_context.get("edit_intent")) > 0 and bool(state.get("review_approved", False)) and bool(state.get("test_passed", False)),
             "targeted_retry_used": (testing_summary.get("validation_strategy") or "full") == "targeted_retry",
+            "blocker_type_retry_used": bool(testing_summary.get("blocker_type_retry_used", False)),
             "command_reduction_count": _count_items(testing_summary.get("skipped_command_labels")),
             "command_reduction_rate": _command_reduction_rate(testing_summary),
+            "task_model_used": _count_items(planning_context.get("tasks")) > 0,
+            "task_total_count": _count_items(planning_context.get("tasks")),
+            "task_completed_count": _task_status_count(state.get("task_statuses"), "completed"),
+            "task_failed_count": _task_status_count(state.get("task_statuses"), "failed"),
+            "failed_task_ids": [tid for tid in (state.get("failed_task_ids") or []) if isinstance(tid, str)],
         },
         "failures": {
             "has_failure": has_failure,
@@ -209,6 +225,37 @@ def _summary_text(value: Any, limit: int = 600) -> str | None:
     return normalized[: limit - 3].rstrip() + "..."
 
 
+def _planning_tasks(raw_tasks: Any, task_statuses: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_tasks, list):
+        return []
+    statuses = task_statuses if isinstance(task_statuses, dict) else {}
+    normalized: list[dict[str, Any]] = []
+    for item in raw_tasks:
+        if not isinstance(item, dict):
+            continue
+        task_id = item.get("id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        status = statuses.get(task_id) if isinstance(statuses.get(task_id), str) else item.get("status")
+        normalized.append(
+            {
+                "id": task_id,
+                "title": item.get("title") if isinstance(item.get("title"), str) else None,
+                "goal": item.get("goal") if isinstance(item.get("goal"), str) else None,
+                "status": status if isinstance(status, str) and status else "pending",
+                "target_files": [
+                    path for path in item.get("target_files", [])
+                    if isinstance(path, str) and path
+                ] if isinstance(item.get("target_files"), list) else [],
+                "acceptance_checks": [
+                    check for check in item.get("acceptance_checks", [])
+                    if isinstance(check, str) and check
+                ] if isinstance(item.get("acceptance_checks"), list) else [],
+            }
+        )
+    return normalized
+
+
 def _review_remediation(remediation: Any) -> dict[str, Any] | None:
     if not isinstance(remediation, dict):
         return None
@@ -229,6 +276,26 @@ def _review_remediation(remediation: Any) -> dict[str, Any] | None:
         "guidance": [
             item for item in remediation.get("guidance", []) if isinstance(item, str) and item
         ] if isinstance(remediation.get("guidance"), list) else [],
+        "task_remediation": [
+            {
+                "task_id": item.get("task_id"),
+                "title": item.get("title"),
+                "blocker_types": [
+                    blocker for blocker in item.get("blocker_types", []) if isinstance(blocker, str) and blocker
+                ] if isinstance(item.get("blocker_types"), list) else [],
+                "failed_validation_labels": [
+                    label for label in item.get("failed_validation_labels", []) if isinstance(label, str) and label
+                ] if isinstance(item.get("failed_validation_labels"), list) else [],
+                "focus_areas": [
+                    path for path in item.get("focus_areas", []) if isinstance(path, str) and path
+                ] if isinstance(item.get("focus_areas"), list) else [],
+                "guidance": [
+                    guidance for guidance in item.get("guidance", []) if isinstance(guidance, str) and guidance
+                ] if isinstance(item.get("guidance"), list) else [],
+            }
+            for item in remediation.get("task_remediation", [])
+            if isinstance(item, dict) and isinstance(item.get("task_id"), str) and item.get("task_id")
+        ] if isinstance(remediation.get("task_remediation"), list) else [],
     }
 
 
@@ -240,10 +307,20 @@ def persist_execution_metrics(workspace_dir: str | None, run_id: str | None, met
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / EXECUTION_METRICS_FILE
     temporary_path = metrics_path.with_suffix(metrics_path.suffix + ".tmp")
-    payload = json.dumps(metrics, indent=2, ensure_ascii=True) + "\n"
+    payload = json.dumps(_json_safe(metrics), indent=2, ensure_ascii=True) + "\n"
     temporary_path.write_text(payload, encoding="utf-8")
     temporary_path.replace(metrics_path)
     return _relative_workspace_path(workspace_dir, metrics_path)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, set):
+        return [_json_safe(item) for item in sorted(value, key=lambda item: repr(item))]
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def build_diagnostics_summary(
@@ -537,6 +614,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 "retry_stop_rate": 0.0,
                 "sandbox_fallback_rate": 0.0,
             },
+            "blocker_type_retry_breakdown": [],
             "slowest_commands": [],
             "top_terminal_nodes": [],
             "top_failing_commands": [],
@@ -582,6 +660,7 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
     command_stats: dict[str, dict[str, Any]] = {}
     terminal_node_counts: dict[str, int] = {}
     failing_command_counts: dict[str, int] = {}
+    blocker_type_retry_stats: dict[str, dict[str, int]] = {}
     validation_strategy_counts: dict[str, int] = {}
     create_pr_outcomes: dict[str, int] = {}
     retry_policy_stop_reasons: dict[str, int] = {}
@@ -666,6 +745,8 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
                 breakdown_terminal_nodes[terminal_node] = breakdown_terminal_nodes.get(terminal_node, 0) + 1
         failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
         validation_strategy = testing.get("validation_strategy")
+        blocker_type_retry_used = bool(testing.get("blocker_type_retry_used", False))
+        blocker_type_retry_labels = testing.get("blocker_type_retry_labels") if isinstance(testing.get("blocker_type_retry_labels"), list) else []
         stop_reason = testing.get("retry_policy_stop_reason")
         sandbox_fallback_reason = testing.get("sandbox_fallback_reason")
         if isinstance(validation_strategy, str) and validation_strategy:
@@ -704,6 +785,17 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             targeted_retry_total_reduction_rate += _as_float(testing.get("command_reduction_rate"))
             if status == "approved":
                 targeted_retry_approved_runs += 1
+        if blocker_type_retry_used:
+            for label in blocker_type_retry_labels:
+                if not isinstance(label, str) or not label:
+                    continue
+                bucket = blocker_type_retry_stats.get(label)
+                if bucket is None:
+                    bucket = {"run_count": 0, "recovered_count": 0}
+                    blocker_type_retry_stats[label] = bucket
+                bucket["run_count"] += 1
+                if status == "approved":
+                    bucket["recovered_count"] += 1
         for failed_command in failed_commands:
             if not isinstance(failed_command, str) or not failed_command:
                 continue
@@ -917,6 +1009,19 @@ def build_execution_metrics_trend(metrics_entries: list[tuple[dict[str, Any], st
             "retry_stop_rate": round(retry_stop_count / comparable_run_count, 2) if comparable_run_count else 0.0,
             "sandbox_fallback_rate": round(sandbox_fallback_count / run_count, 2) if run_count else 0.0,
         },
+        "blocker_type_retry_breakdown": [
+            {
+                "label": label,
+                "run_count": bucket["run_count"],
+                "recovered_count": bucket["recovered_count"],
+                "recovery_rate": round(bucket["recovered_count"] / bucket["run_count"], 2) if bucket["run_count"] else 0.0,
+            }
+            for label, bucket in sorted(
+                blocker_type_retry_stats.items(),
+                key=lambda item: (item[1]["run_count"], item[1]["recovered_count"], item[0]),
+                reverse=True,
+            )[:5]
+        ],
         "slowest_commands": sorted(
             command_stats.values(),
             key=lambda item: (item["max_duration_ms"], item["average_duration_ms"], item["count"]),
@@ -1013,6 +1118,10 @@ def _diagnostics_summary_row(metrics: dict[str, Any], path: str) -> dict[str, An
         "primary_failure": failures.get("primary_category") or "",
         "failure_subcategory": failures.get("subcategory") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "blocker_type_retry_used": bool(testing.get("blocker_type_retry_used", False)),
+        "blocker_type_retry_labels": ",".join(
+            label for label in (testing.get("blocker_type_retry_labels") or []) if isinstance(label, str) and label
+        ),
         "selected_skills": _selected_skill_names(planning.get("selected_skills")),
         "create_pr_outcome": create_pr.get("outcome") or "",
         "create_pr_reason": create_pr.get("reason") or "",
@@ -1079,6 +1188,10 @@ def _phase_metrics(execution_events: list[dict[str, Any]], started_at: str, stat
         phase_metrics["code"]["status"] = "completed"
     if phase_metrics["plan"]["attempts"] > 0 and phase_metrics["plan"]["status"] != "in_progress":
         phase_metrics["plan"]["status"] = "completed"
+    if phase_metrics["analysis"]["attempts"] > 0 and phase_metrics["analysis"]["status"] != "in_progress":
+        phase_metrics["analysis"]["status"] = "completed"
+    if phase_metrics["scope"]["attempts"] > 0 and phase_metrics["scope"]["status"] != "in_progress":
+        phase_metrics["scope"]["status"] = "completed"
 
     return phase_metrics
 
@@ -1279,6 +1392,8 @@ def _failure_categories(
     error_message = state.get("error_message") if isinstance(state.get("error_message"), str) else ""
     test_results = state.get("test_results") if isinstance(state.get("test_results"), str) else ""
 
+    if bool(state.get("state_validation_failed", False)) or error_message.startswith("state invariant violation"):
+        categories.append("orchestration")
     if _looks_like_configuration_failure(error_message, test_results):
         categories.append("configuration")
     if _looks_like_sandbox_failure(error_message, test_results):
@@ -1295,7 +1410,7 @@ def _failure_categories(
         categories.append("review")
 
     deduped: list[str] = []
-    for category in ["configuration", "sandbox", "policy", "validation", "generation", "review"]:
+    for category in ["orchestration", "configuration", "sandbox", "policy", "validation", "generation", "review"]:
         if category in categories and category not in deduped:
             deduped.append(category)
     return deduped or (["unknown"] if state.get("error_message") or test_results else [])
@@ -1308,6 +1423,8 @@ def _failure_subcategory(
     review_summary: dict[str, Any],
     codegen_summary: dict[str, Any],
 ) -> str | None:
+    if primary_category == "orchestration":
+        return "state_invariant_violation"
     if primary_category == "configuration":
         return _configuration_subcategory(state)
     if primary_category == "sandbox":
@@ -1335,6 +1452,8 @@ def _failure_subcategory_from_metrics(metrics: dict[str, Any]) -> str | None:
     testing = metrics.get("testing") if isinstance(metrics.get("testing"), dict) else {}
     review = metrics.get("review") if isinstance(metrics.get("review"), dict) else {}
     coding = metrics.get("coding") if isinstance(metrics.get("coding"), dict) else {}
+    if primary_category == "orchestration":
+        return "state_invariant_violation"
     if primary_category == "configuration":
         error_message = failures.get("error_message") if isinstance(failures.get("error_message"), str) else ""
         return _configuration_subcategory({"error_message": error_message, "test_results": error_message})
@@ -1499,6 +1618,12 @@ def _is_analysis_only(issue_description: str) -> bool:
 
 def _count_items(value: Any) -> int:
     return len(value) if isinstance(value, (list, tuple, set)) else 0
+
+
+def _task_status_count(task_statuses: Any, status: str) -> int:
+    if not isinstance(task_statuses, dict):
+        return 0
+    return sum(1 for v in task_statuses.values() if v == status)
 
 
 def _count_mapping_entries(value: Any) -> int:

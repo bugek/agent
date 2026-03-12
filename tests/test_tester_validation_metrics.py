@@ -38,6 +38,8 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertEqual(summary["selected_command_labels"], ["compileall", "script:build"])
         self.assertEqual(summary["skipped_command_labels"], ["script:test"])
         self.assertEqual(summary["requested_retry_labels"], ["script:build"])
+        self.assertEqual(summary["blocker_type_retry_used"], False)
+        self.assertEqual(summary["blocker_type_retry_labels"], [])
         self.assertIsNone(summary["retry_policy_reason"])
         self.assertIsNone(summary["retry_policy_history_source"])
         self.assertIsNone(summary["retry_policy_confidence"])
@@ -114,6 +116,91 @@ class TesterValidationMetricsTest(unittest.TestCase):
         self.assertIsNone(plan["policy_confidence"])
         self.assertEqual(plan["stop_retry_after_failure"], False)
         self.assertIsNone(plan["stop_reason"])
+
+    def test_build_validation_plan_uses_type_error_blocker_for_precise_typecheck_retry(self) -> None:
+        workspace_profile = {
+            "has_python": False,
+            "has_package_json": True,
+            "needs_install": True,
+            "package_manager": "npm",
+            "frameworks": ["nextjs"],
+            "scripts": ["lint", "typecheck", "build", "test"],
+            "nextjs": {"router_type": "app"},
+            "tsconfig_exists": True,
+            "lockfiles": ["package-lock.json"],
+        }
+
+        plan = self.agent._build_validation_plan(
+            {
+                "workspace_dir": ".",
+                "retry_count": 1,
+                "testing_summary": {"failed_commands": ["script:test"]},
+                "review_summary": {
+                    "status": "changes_required",
+                    "remediation": {
+                        "required": True,
+                        "failed_validation_labels": ["script:test"],
+                        "task_remediation": [
+                            {
+                                "task_id": "T2",
+                                "blocker_types": ["type_error"],
+                                "focus_areas": ["app/page.tsx"],
+                            }
+                        ],
+                    },
+                },
+            },
+            workspace_profile,
+        )
+
+        self.assertEqual(plan["strategy"], "targeted_retry")
+        self.assertEqual(plan["requested_retry_labels"], ["script:typecheck"])
+        self.assertEqual(plan["selected_labels"], ["package-install", "script:typecheck"])
+        self.assertEqual(plan["blocker_type_retry_used"], True)
+        self.assertEqual(plan["blocker_type_retry_labels"], ["script:typecheck"])
+        self.assertIn("script:test", plan["skipped_labels"])
+        self.assertEqual(plan["policy_reason"], "blocker_type_targeted_retry")
+
+    def test_build_validation_plan_uses_visual_blocker_for_visual_only_retry(self) -> None:
+        workspace_profile = {
+            "has_python": False,
+            "has_package_json": True,
+            "needs_install": True,
+            "package_manager": "npm",
+            "frameworks": ["nextjs"],
+            "scripts": ["typecheck", "build", "visual-review"],
+            "nextjs": {"router_type": "app"},
+            "tsconfig_exists": True,
+            "lockfiles": ["package-lock.json"],
+        }
+
+        plan = self.agent._build_validation_plan(
+            {
+                "workspace_dir": ".",
+                "retry_count": 1,
+                "review_summary": {
+                    "status": "changes_required",
+                    "visual_review": {"screenshot_status": "passed", "missing_states": ["empty_state"], "missing_responsive_categories": []},
+                    "remediation": {
+                        "required": True,
+                        "task_remediation": [
+                            {
+                                "task_id": "T3",
+                                "blocker_types": ["missing_state_coverage"],
+                                "focus_areas": ["app/page.tsx"],
+                            }
+                        ],
+                    },
+                },
+            },
+            workspace_profile,
+        )
+
+        self.assertEqual(plan["requested_retry_labels"], ["script:visual-review"])
+        self.assertEqual(plan["selected_labels"], ["package-install", "script:visual-review"])
+        self.assertEqual(plan["blocker_type_retry_used"], True)
+        self.assertEqual(plan["blocker_type_retry_labels"], ["script:visual-review"])
+        self.assertEqual(plan["policy_reason"], "blocker_type_targeted_retry")
 
     def test_build_validation_plan_falls_back_to_full_without_retry_signals(self) -> None:
         workspace_profile = {
@@ -352,6 +439,51 @@ class TesterValidationMetricsTest(unittest.TestCase):
             },
             {
                 "needs_install": True,
+                "package_manager": "npm",
+                "lockfiles": ["package-lock.json"],
+            },
+        )
+
+        self.assertEqual(command, "npm install")
+
+    def test_install_command_uses_npm_install_when_package_manifest_changed(self) -> None:
+        command = self.agent._install_command(
+            {
+                "issue_description": "create github page layout with react flow workspace",
+                "patches": [{"file": "package.json"}],
+            },
+            {
+                "needs_install": True,
+                "package_manager": "npm",
+                "lockfiles": ["package-lock.json"],
+            },
+        )
+
+        self.assertEqual(command, "npm install")
+
+    def test_install_command_uses_npm_ci_when_lockfile_exists_and_manifest_unchanged(self) -> None:
+        command = self.agent._install_command(
+            {
+                "issue_description": "create github page layout with react flow workspace",
+                "patches": [{"file": "app/github/page.tsx"}],
+            },
+            {
+                "needs_install": True,
+                "package_manager": "npm",
+                "lockfiles": ["package-lock.json"],
+            },
+        )
+
+        self.assertEqual(command, "npm ci")
+
+    def test_install_command_uses_npm_install_when_manifest_changed_even_with_existing_node_modules(self) -> None:
+        command = self.agent._install_command(
+            {
+                "issue_description": "create github page layout with react flow workspace",
+                "patches": [{"file": "package.json"}],
+            },
+            {
+                "needs_install": False,
                 "package_manager": "npm",
                 "lockfiles": ["package-lock.json"],
             },

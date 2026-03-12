@@ -9,6 +9,7 @@ from ai_code_agent.config import AgentConfig
 from ai_code_agent.integrations.workflow_support import resolve_issue_input
 from ai_code_agent.llm.client import LLMClient
 from ai_code_agent.metrics import (
+    _json_safe,
     build_diagnostics_summary,
     build_execution_metrics_trend,
     generate_run_id,
@@ -272,6 +273,10 @@ def run_monitor_services(
 
     backend_env = os.environ.copy()
     backend_env["MONITOR_FRONTEND_URL"] = frontend_url
+    existing_monitor_origins = [item.strip() for item in backend_env.get("MONITOR_FRONTEND_ORIGINS", "").split(",") if item.strip()]
+    if frontend_url not in existing_monitor_origins:
+        existing_monitor_origins.append(frontend_url)
+    backend_env["MONITOR_FRONTEND_ORIGINS"] = ",".join(existing_monitor_origins)
 
     frontend_env = os.environ.copy()
     frontend_env["VITE_MONITOR_API_BASE"] = backend_url
@@ -459,6 +464,15 @@ def _print_summary_text_output(
             f"retry_stop_rate={dashboard.get('retry_stop_rate', 0.0):.2f}, "
             f"sandbox_fallback_rate={dashboard.get('sandbox_fallback_rate', 0.0):.2f}"
         )
+    if trend.get("blocker_type_retry_breakdown"):
+        print(
+            "Blocker-type retry breakdown: "
+            + "; ".join(
+                f"{item['label']}(runs={item['run_count']}, recovered={item['recovered_count']}, rate={item['recovery_rate']:.2f})"
+                for item in trend["blocker_type_retry_breakdown"]
+                if isinstance(item, dict)
+            )
+        )
     if trend.get("top_terminal_nodes"):
         print(
             "Top terminal nodes: "
@@ -533,7 +547,7 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
             print(json.dumps(row, ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tblocker_type_retry_used\tblocker_type_retry_labels\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -546,6 +560,8 @@ def _print_summary_export_output(summary: dict, output_format: str) -> None:
                         "primary_failure",
                         "failure_subcategory",
                         "validation_strategy",
+                        "blocker_type_retry_used",
+                        "blocker_type_retry_labels",
                         "create_pr_outcome",
                         "create_pr_reason",
                         "retry_recovered",
@@ -607,6 +623,11 @@ def _print_single_run_diagnostics(metrics: dict, metrics_path: str) -> None:
     requested_retry_labels = testing.get("requested_retry_labels") or []
     if requested_retry_labels:
         print(f"Requested retry labels: {', '.join(requested_retry_labels)}")
+    if isinstance(testing.get("blocker_type_retry_used"), bool):
+        print(f"Blocker-type retry used: {testing.get('blocker_type_retry_used')}")
+    blocker_type_retry_labels = testing.get("blocker_type_retry_labels") or []
+    if blocker_type_retry_labels:
+        print(f"Blocker-type retry labels: {', '.join(blocker_type_retry_labels)}")
     skipped_command_count = testing.get("skipped_command_count")
     if isinstance(skipped_command_count, int) and skipped_command_count > 0:
         print(f"Skipped commands on this pass: {skipped_command_count}")
@@ -688,7 +709,7 @@ def _print_export_output(
             print(json.dumps(_diagnostics_row(metrics, path), ensure_ascii=True))
         return
     if output_format == "rows":
-        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+        print("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tblocker_type_retry_used\tblocker_type_retry_labels\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
         for metrics, path in metrics_entries:
             row = _diagnostics_row(metrics, path)
             print(
@@ -700,6 +721,8 @@ def _print_export_output(
                         "primary_failure",
                         "failure_subcategory",
                         "validation_strategy",
+                        "blocker_type_retry_used",
+                        "blocker_type_retry_labels",
                         "create_pr_outcome",
                         "create_pr_reason",
                         "retry_recovered",
@@ -728,6 +751,10 @@ def _diagnostics_row(metrics: dict, path: str) -> dict[str, object]:
         "primary_failure": failures.get("primary_category") or "",
         "failure_subcategory": failures.get("subcategory") or "",
         "validation_strategy": testing.get("validation_strategy") or "full",
+        "blocker_type_retry_used": bool(testing.get("blocker_type_retry_used", False)),
+        "blocker_type_retry_labels": ",".join(
+            label for label in (testing.get("blocker_type_retry_labels") or []) if isinstance(label, str) and label
+        ),
         "create_pr_outcome": create_pr.get("outcome") or "",
         "create_pr_reason": create_pr.get("reason") or "",
         "retry_recovered": bool(effectiveness.get("retry_recovered", False)),
@@ -804,6 +831,8 @@ def cli(argv: list[str] | None = None):
         "workspace_dir": args.repo or config.workspace_dir,
         "run_id": generate_run_id(),
         "workflow_started_at": utc_now_iso(),
+        "scope_context": {},
+        "analysis_context": {},
         "plan": None,
         "files_to_edit": [],
         "patches": [],
@@ -812,6 +841,7 @@ def cli(argv: list[str] | None = None):
         "review_comments": [],
         "review_approved": False,
         "retry_count": 0,
+        "state_validation_failed": False,
         "error_message": None,
         "created_pr_url": None,
         "execution_log": [],
@@ -823,7 +853,7 @@ def cli(argv: list[str] | None = None):
     final_state = graph.invoke(initial_state)
 
     if args.json:
-        print(json.dumps(final_state, indent=2, ensure_ascii=True))
+        print(json.dumps(_json_safe(final_state), indent=2, ensure_ascii=True))
     else:
         print("Plan:")
         print(final_state.get("plan") or "<none>")

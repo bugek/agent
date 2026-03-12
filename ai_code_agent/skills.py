@@ -182,7 +182,7 @@ def _load_skill_file(workspace_dir: str, skill_file: Path) -> SkillDefinition | 
         return None
 
     metadata, body = _parse_frontmatter(raw_text)
-    relative_path = skill_file.resolve().relative_to(Path(workspace_dir).resolve()).as_posix()
+    relative_path = _display_skill_path(workspace_dir, skill_file)
     _validate_skill_manifest(relative_path, metadata, body)
     name = _string_value(metadata.get("name")) or skill_file.parent.name
     version = _string_value(metadata.get("version")) or "0.0.0"
@@ -212,6 +212,15 @@ def _load_skill_file(workspace_dir: str, skill_file: Path) -> SkillDefinition | 
         output_schema=output_schema,
         instructions=instructions,
     )
+
+
+def _display_skill_path(workspace_dir: str, skill_file: Path) -> str:
+    resolved_skill_file = skill_file.resolve()
+    resolved_workspace_dir = Path(workspace_dir).resolve()
+    try:
+        return resolved_skill_file.relative_to(resolved_workspace_dir).as_posix()
+    except ValueError:
+        return resolved_skill_file.as_posix()
 
 
 def _validate_skill_manifest(skill_path: str, metadata: dict[str, Any], body: str) -> None:

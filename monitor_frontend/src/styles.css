@@ -744,6 +744,43 @@ input:focus {
   margin-top: 10px;
 }
 
+.breakdown-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.breakdown-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(10, 20, 36, 0.9);
+}
+
+.breakdown-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.breakdown-bar {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(136, 163, 198, 0.14);
+}
+
+.breakdown-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(88, 166, 255, 0.92), rgba(50, 196, 141, 0.92));
+}
+
 .list-card {
   padding: 16px;
   border: 1px solid var(--line);

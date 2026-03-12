@@ -57,6 +57,14 @@ class PlannerRemediationIntentTest(unittest.TestCase):
                             "focus_areas": ["app/dashboard/page.tsx"],
                             "guidance": ["Fix the failing dashboard route before broadening validation."],
                             "failed_operations": [],
+                            "task_remediation": [
+                                {
+                                    "task_id": "T2",
+                                    "blocker_types": ["validation_failure"],
+                                    "focus_areas": ["app/dashboard/page.tsx"],
+                                    "guidance": ["Repair the dashboard task before expanding scope."],
+                                }
+                            ],
                         },
                     },
                 }
@@ -65,12 +73,56 @@ class PlannerRemediationIntentTest(unittest.TestCase):
             self.assertIsNotNone(llm.payload)
             self.assertEqual(llm.payload["retry_count"], 1)
             self.assertEqual(llm.payload["remediation"]["failed_validation_labels"], ["script:test"])
+            self.assertEqual(llm.payload["remediation"]["task_remediation"][0]["task_id"], "T2")
             self.assertEqual(llm.payload["candidate_files"][0], "app/dashboard/page.tsx")
             self.assertEqual(result["files_to_edit"], ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"])
             self.assertEqual(result["planning_context"]["remediation"]["focus_areas"], ["app/dashboard/page.tsx", "app/dashboard/loading.tsx", "app/dashboard/error.tsx"])
             self.assertEqual(result["planning_context"]["edit_intent"][0]["file_path"], "app/dashboard/page.tsx")
             self.assertEqual(result["planning_context"]["edit_intent"][0]["validation_targets"], ["script:test"])
             self.assertIn("Inspect the failing dashboard page.", result["plan"])
+
+    def test_planner_keeps_retry_focus_area_directories_in_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "app/github").mkdir(parents=True)
+            (workspace / "components/graph").mkdir(parents=True)
+            (workspace / "app/github/page.tsx").write_text("export default function Page() { return null; }\n", encoding="utf-8")
+            (workspace / "components/graph/graph-workspace.tsx").write_text("export function GraphWorkspace() { return null; }\n", encoding="utf-8")
+            (workspace / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "demo",
+                        "version": "0.1.0",
+                        "dependencies": {"next": "14.2.16", "react": "18.3.1", "react-dom": "18.3.1"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            llm = CapturingPlannerLLM()
+            planner = PlannerAgent(AgentConfig(workspace_dir=temp_dir), llm)
+            result = planner.run(
+                {
+                    "issue_description": "repair github graph workspace type errors",
+                    "workspace_dir": temp_dir,
+                    "retry_count": 1,
+                    "review_summary": {
+                        "status": "changes_required",
+                        "remediation": {
+                            "required": True,
+                            "failed_validation_labels": ["script:typecheck"],
+                            "focus_areas": ["components/graph/"],
+                            "guidance": ["Keep graph primitives in scope during retry planning."],
+                            "failed_operations": [],
+                            "task_remediation": [],
+                        },
+                    },
+                }
+            )
+
+            self.assertIn("components/graph/", result["planning_context"]["scope"]["in_scope"])
 
     def test_planner_includes_version_resolution_for_dependency_upgrade_requests(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

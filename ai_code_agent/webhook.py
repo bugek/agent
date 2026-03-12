@@ -29,6 +29,28 @@ VISUAL_REVIEW_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp'}
 TEXT_ARTIFACT_EXTENSIONS = {'.txt', '.log', '.json', '.ndjson', '.md'}
 
 
+def _monitor_cors_origins() -> list[str]:
+    configured_origins = os.environ.get("MONITOR_FRONTEND_ORIGINS", "")
+    origins = [
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+    ]
+    frontend_url = os.environ.get("MONITOR_FRONTEND_URL")
+    if frontend_url:
+        origins.append(frontend_url.rstrip("/"))
+    if configured_origins:
+        origins.extend(item.strip().rstrip("/") for item in configured_origins.split(",") if item.strip())
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for origin in origins:
+        if origin in seen:
+            continue
+        seen.add(origin)
+        deduped.append(origin)
+    return deduped
+
+
 def _monitor_frontend_url(repo: str | None = None, recent: int | None = None) -> str:
     frontend_base = os.environ.get("MONITOR_FRONTEND_URL", "http://127.0.0.1:4173").rstrip("/")
     query: dict[str, str] = {}
@@ -222,13 +244,17 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
     failures = metrics.get("failures") if isinstance(metrics.get("failures"), dict) else {}
 
     review_remediation = review.get("remediation") if isinstance(review.get("remediation"), dict) else {}
+    task_remediation = review_remediation.get("task_remediation") if isinstance(review_remediation.get("task_remediation"), list) else []
 
     issue_description = issue.get("description") if isinstance(issue.get("description"), str) else None
     frameworks = workspace.get("frameworks") if isinstance(workspace.get("frameworks"), list) else []
     failed_commands = testing.get("failed_commands") if isinstance(testing.get("failed_commands"), list) else []
     requested_retry_labels = testing.get("requested_retry_labels") if isinstance(testing.get("requested_retry_labels"), list) else []
+    blocker_type_retry_labels = testing.get("blocker_type_retry_labels") if isinstance(testing.get("blocker_type_retry_labels"), list) else []
     monitor_images = _monitor_image_entries(workspace_dir) if workspace_dir else []
+    selected_skill_details = planning.get("selected_skill_details") if isinstance(planning.get("selected_skill_details"), list) else []
     selected_skills = planning.get("selected_skills") if isinstance(planning.get("selected_skills"), list) else []
+    planning_tasks = planning.get("tasks") if isinstance(planning.get("tasks"), list) else []
     blocked_skills = planning.get("blocked_skill_details") if isinstance(planning.get("blocked_skill_details"), list) else []
     if not blocked_skills:
         blocked_skills = planning.get("blocked_skills") if isinstance(planning.get("blocked_skills"), list) else []
@@ -248,6 +274,42 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
             compose_log_artifacts.append(compose_log_artifact)
 
     return {
+        "scope": {
+            "title": "Scope agent",
+            "narrative": "The scope step narrows the requested change into explicit boundaries before deeper analysis and planning begin.",
+            "inputs": [
+                f"Issue: {issue_description or 'none'}",
+                f"Workspace frameworks: {_join_items([str(item) for item in frameworks if isinstance(item, str)])}",
+            ],
+            "outputs": [
+                f"In-scope paths: {planning.get('scope_in_count') or 0}",
+                f"Out-of-scope paths: {planning.get('scope_out_count') or 0}",
+            ],
+            "highlights": [
+                f"Failure reason: {failures.get('error_message') or 'none'}",
+            ],
+            "artifacts": [],
+            "images": [],
+        },
+        "analysis": {
+            "title": "Analysis agent",
+            "narrative": "The analysis step gathers repository evidence, candidate files, and retrieval signals before planning starts.",
+            "inputs": [
+                f"Issue: {issue_description or 'none'}",
+                f"Workspace frameworks: {_join_items([str(item) for item in frameworks if isinstance(item, str)])}",
+            ],
+            "outputs": [
+                f"Retrieval strategy: {planning.get('retrieval_strategy') or 'none'}",
+                f"Candidate files: {planning.get('candidate_file_count') or 0}",
+                f"Graph seed files: {planning.get('graph_seed_file_count') or 0}",
+            ],
+            "highlights": [
+                f"Selected skills: {_join_items(_planning_skill_names(selected_skill_details or selected_skills))}",
+                f"Failure reason: {failures.get('error_message') or 'none'}",
+            ],
+            "artifacts": [],
+            "images": [],
+        },
         "plan": {
             "title": "Planner agent",
             "narrative": "The planner turns the issue into a concrete execution plan, retrieval scope, and downstream edit intent.",
@@ -258,11 +320,12 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
             "outputs": [
                 f"Plan summary: {planning.get('plan_summary') or 'none'}",
                 f"Retrieval strategy: {planning.get('retrieval_strategy') or 'none'}",
-                f"Selected skills: {_join_items(_planning_skill_names(selected_skills))}",
+                f"Selected skills: {_join_items(_planning_skill_names(selected_skill_details or selected_skills))}",
                 f"Skill invocations: {_join_items(_skill_invocation_summaries(skill_invocations))}",
                 f"Candidate files: {planning.get('candidate_file_count') or 0}",
                 f"Files to edit: {planning.get('files_to_edit_count') or 0}",
                 f"Edit intent count: {planning.get('edit_intent_count') or 0}",
+                f"Tasks: {planning.get('task_count') or len(planning_tasks)}",
             ],
             "highlights": [
                 f"Available skills: {planning.get('available_skill_count') or 0}",
@@ -270,10 +333,13 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
                 f"Skill invocation outcomes: {_join_items([f'{key}:{value}' for key, value in ((metrics.get('skills') if isinstance(metrics.get('skills'), dict) else {}) or {}).get('outcome_counts', {}).items() if isinstance(key, str)])}",
                 f"Graph seed files: {planning.get('graph_seed_file_count') or 0}",
                 f"Blocked files: {planning.get('blocked_file_count') or 0}",
+                f"Failed tasks: {_join_items([str(item) for item in planning.get('task_failed_ids', []) if isinstance(item, str)])}",
+                f"Failure reason: {failures.get('error_message') or 'none'}",
             ],
-            "skills": [item for item in selected_skills if isinstance(item, dict)],
+            "skills": [item for item in (selected_skill_details or selected_skills) if isinstance(item, dict)],
             "blocked_skills": [item for item in blocked_skills if isinstance(item, dict)],
             "skill_invocations": [item for item in skill_invocations if isinstance(item, dict)],
+            "tasks": [item for item in planning_tasks if isinstance(item, dict)],
             "artifacts": [],
             "images": [],
         },
@@ -310,12 +376,14 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
                 f"Lint issues: {testing.get('lint_issue_count') or 0}",
                 f"Compose readiness: {testing.get('compose_readiness_status') or 'none'}",
                 f"Compose logs: {testing.get('compose_logs_path') or 'none'}",
+                f"Blocker-type retry labels: {_join_items([str(item) for item in blocker_type_retry_labels if isinstance(item, str)])}",
                 f"Screenshot status: {((testing.get('visual_review') if isinstance(testing.get('visual_review'), dict) else {}) or {}).get('screenshot_status') or 'none'}",
                 f"Screenshot artifacts: {((testing.get('visual_review') if isinstance(testing.get('visual_review'), dict) else {}) or {}).get('artifact_count') or 0}",
                 *[f"Command: {item}" for item in _command_summaries(testing.get('commands'))],
             ],
             "highlights": [
                 f"Requested retry labels: {_join_items([str(item) for item in requested_retry_labels if isinstance(item, str)])}",
+                f"Blocker-type retry used: {'yes' if testing.get('blocker_type_retry_used') else 'no'}",
                 f"Skipped commands: {testing.get('skipped_command_count') or 0}",
                 f"Compose ready services: {_join_items([str(item) for item in testing.get('compose_ready_services', []) if isinstance(item, str)])}",
                 f"Failure taxonomy: {failures.get('primary_category') or 'none'}/{failures.get('subcategory') or 'none'}",
@@ -334,13 +402,16 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
                 f"Review status: {review.get('status') or 'none'}",
                 f"Approved: {'yes' if review.get('approved') else 'no'}",
                 f"Residual risks: {review.get('residual_risk_count') or 0}",
+                f"Failed tasks: {_join_items([str(item) for item in review.get('failed_task_ids', []) if isinstance(item, str)])}",
                 f"Remediation guidance: {_join_items([str(item) for item in review_remediation.get('guidance', []) if isinstance(item, str)])}",
+                f"Task blockers: {_join_items([_task_remediation_summary(item) for item in task_remediation if isinstance(item, dict)])}",
             ],
             "highlights": [
                 f"Changed areas: {review.get('changed_area_count') or 0}",
                 f"Remediation required: {'yes' if review.get('remediation_required') else 'no'}",
                 f"Focus areas: {_join_items([str(item) for item in review_remediation.get('focus_areas', []) if isinstance(item, str)])}",
             ],
+            "tasks": [item for item in planning_tasks if isinstance(item, dict)],
             "artifacts": [],
             "images": monitor_images,
         },
@@ -365,6 +436,20 @@ def _monitor_phase_details(metrics: dict[str, object], workspace_dir: str | None
             "images": [],
         },
     }
+
+
+def _task_remediation_summary(item: dict[str, object]) -> str:
+    task_id = item.get("task_id") if isinstance(item.get("task_id"), str) else "unknown"
+    blocker_types = [
+        blocker for blocker in item.get("blocker_types", []) if isinstance(blocker, str) and blocker
+    ] if isinstance(item.get("blocker_types"), list) else []
+    focus_areas = [
+        path for path in item.get("focus_areas", []) if isinstance(path, str) and path
+    ] if isinstance(item.get("focus_areas"), list) else []
+    blocker_text = "/".join(blocker_types) if blocker_types else "unspecified"
+    if focus_areas:
+        return f"{task_id} [{blocker_text}] -> {', '.join(focus_areas[:2])}"
+    return f"{task_id} [{blocker_text}]"
 
 
 def _monitor_payload(repo: str | None, recent: int) -> dict[str, object]:
@@ -407,10 +492,8 @@ if FastAPI is not None:
     if CORSMiddleware is not None:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=[
-                "http://127.0.0.1:4173",
-                "http://localhost:4173",
-            ],
+            allow_origins=_monitor_cors_origins(),
+            allow_origin_regex=r"https?://(127\.0\.0\.1|localhost)(:\d+)?",
             allow_credentials=False,
             allow_methods=["GET"],
             allow_headers=["*"],

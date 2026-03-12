@@ -45,6 +45,36 @@ Use this skill for UI work.
         self.assertEqual(skills[0].output_schema["type"], "object")
         self.assertIn("Use this skill", skills[0].instructions)
 
+    def test_discover_local_skills_supports_registry_outside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as registry_root:
+            skill_dir = Path(registry_root) / "frontend-visual-review"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_file = skill_dir / "SKILL.md"
+            skill_file.write_text(
+                """---
+name: frontend-visual-review
+version: 0.1.0
+title: Frontend Visual Review
+description: Keep screenshot-backed UI checks visible in planning.
+tags: frontend, ui, screenshot
+triggers: screenshot, visual review, loading state
+frameworks: nextjs, react
+permission: read-only
+sandbox: optional
+input_schema: {"type": "object", "properties": {"issue": {"type": "string"}}, "required": ["issue"]}
+output_schema: {"type": "object", "properties": {"plan_notes": {"type": "array"}}, "required": ["plan_notes"]}
+---
+
+Use this skill for UI work.
+""",
+                encoding="utf-8",
+            )
+
+            skills = discover_local_skills(workspace_dir, [registry_root])
+
+        self.assertEqual(len(skills), 1)
+        self.assertEqual(skills[0].path, skill_file.resolve().as_posix())
+
     def test_select_skills_scores_issue_and_workspace_matches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             visual_skill_dir = Path(temp_dir) / "skills" / "frontend-visual-review"

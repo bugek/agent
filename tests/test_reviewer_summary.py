@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from ai_code_agent.agents.reviewer import ReviewerAgent
 from ai_code_agent.config import AgentConfig
@@ -85,7 +87,21 @@ class ReviewerSummaryTest(unittest.TestCase):
     def test_review_summary_includes_remediation_for_retry_loop(self) -> None:
         reviewer = ReviewerAgent(
             AgentConfig(workspace_dir="."),
-            StubLLM({"review_comments": ["Fix the failing compile step in the generated controller."], "review_approved": False}),
+            StubLLM(
+                {
+                    "review_comments": ["Fix the failing compile step in the generated controller."],
+                    "review_approved": False,
+                    "failed_task_ids": ["T1"],
+                    "task_remediation": [
+                        {
+                            "task_id": "T1",
+                            "blocker_types": ["build_breakage"],
+                            "focus_areas": ["src/users/users.controller.ts"],
+                            "guidance": ["Repair the generated controller compile error."],
+                        }
+                    ],
+                }
+            ),
         )
 
         result = reviewer.run(
@@ -102,6 +118,17 @@ class ReviewerSummaryTest(unittest.TestCase):
                     ],
                 },
                 "visual_review": None,
+                "planning_context": {
+                    "tasks": [
+                        {
+                            "id": "T1",
+                            "title": "Users controller",
+                            "goal": "Add the new controller endpoint.",
+                            "target_files": ["src/users/users.controller.ts"],
+                            "acceptance_checks": ["compileall"],
+                        }
+                    ]
+                },
             }
         )
 
@@ -112,6 +139,52 @@ class ReviewerSummaryTest(unittest.TestCase):
         self.assertEqual(remediation["failed_operations"], ["replace_text failed for src/users/users.controller.ts"])
         self.assertIn("src/users/users.controller.ts", remediation["focus_areas"])
         self.assertIn("Fix the failing compile step in the generated controller.", remediation["guidance"])
+        self.assertEqual(remediation["task_remediation"][0]["task_id"], "T1")
+        self.assertEqual(remediation["task_remediation"][0]["blocker_types"], ["build_breakage", "operation_failure"])
+        self.assertIn("Repair the generated controller compile error.", remediation["task_remediation"][0]["guidance"])
+
+    def test_review_summary_marks_type_errors_and_missing_state_coverage_per_task(self) -> None:
+        reviewer = ReviewerAgent(
+            AgentConfig(workspace_dir="."),
+            StubLLM({"review_comments": ["Fix the graph page blockers."], "review_approved": False}),
+        )
+
+        result = reviewer.run(
+            {
+                "issue_description": "add graph page",
+                "workspace_dir": ".",
+                "patches": [{"file": "app/graph/page.tsx"}],
+                "test_passed": False,
+                "test_results": "typecheck(exit=1):\nboom\n",
+                "visual_review": {
+                    "enabled": True,
+                    "screenshot_status": "passed",
+                    "state_coverage": {
+                        "loading_file": True,
+                        "error_file": False,
+                        "loading_state": True,
+                        "empty_state": False,
+                        "error_state": True,
+                        "success_state": True,
+                    },
+                    "responsive_review": {"missing_categories": [], "missing_viewport_metadata": []},
+                },
+                "planning_context": {
+                    "tasks": [
+                        {
+                            "id": "T2",
+                            "title": "Graph page",
+                            "target_files": ["app/graph/page.tsx"],
+                            "acceptance_checks": ["typecheck"],
+                        }
+                    ]
+                },
+            }
+        )
+
+        blocker_types = result["task_remediation"][0]["blocker_types"]
+        self.assertEqual(blocker_types, ["type_error", "missing_state_coverage"])
+        self.assertIn("Fix the type-checking failures for this task: typecheck.", result["task_remediation"][0]["guidance"])
 
     def test_reviewer_falls_back_when_llm_review_fails(self) -> None:
         reviewer = ReviewerAgent(AgentConfig(workspace_dir="."), RaisingStubLLM())
@@ -200,6 +273,86 @@ class ReviewerSummaryTest(unittest.TestCase):
         self.assertEqual(llm.payload["version_resolution"]["selected_version"], "16.1.6")
         self.assertEqual(llm.payload["dependency_changes"]["next"]["before"], "14.2.16")
         self.assertEqual(llm.payload["dependency_changes"]["next"]["after"], "16.1.6")
+
+    def test_reviewer_accepts_synchronized_lockfile_task_without_lockfile_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "smartfarm-dashboard",
+                        "dependencies": {
+                            "next": "16.1.6",
+                            "react": "18.3.1",
+                            "react-dom": "18.3.1",
+                            "reactflow": "^11.11.4",
+                        },
+                    },
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            (root / "package-lock.json").write_text(
+                json.dumps(
+                    {
+                        "name": "smartfarm-dashboard",
+                        "lockfileVersion": 3,
+                        "requires": True,
+                        "packages": {
+                            "": {
+                                "dependencies": {
+                                    "next": "16.1.6",
+                                    "react": "18.3.1",
+                                    "react-dom": "18.3.1",
+                                    "reactflow": "^11.11.4",
+                                }
+                            }
+                        },
+                    },
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+
+            reviewer = ReviewerAgent(
+                AgentConfig(workspace_dir=temp_dir),
+                StubLLM(
+                    {
+                        "review_comments": [
+                            "Task T1 is not fully satisfied because package-lock.json is not listed among the changed files."
+                        ],
+                        "review_approved": False,
+                        "failed_task_ids": ["T1"],
+                    }
+                ),
+            )
+
+            result = reviewer.run(
+                {
+                    "issue_description": "add react flow workspace",
+                    "workspace_dir": temp_dir,
+                    "patches": [{"file": "package.json"}, {"file": "app/github/page.tsx"}],
+                    "test_passed": True,
+                    "test_results": "script:typecheck(exit=0):\n\nscript:build(exit=0):\n",
+                    "planning_context": {
+                        "tasks": [
+                            {
+                                "id": "T1",
+                                "title": "Add and lock React Flow dependency",
+                                "goal": "Ensure the graph feature's React Flow package is declared in package.json and fully pinned in package-lock.json.",
+                                "target_files": ["package.json", "package-lock.json"],
+                                "acceptance_checks": ["build", "typecheck"],
+                            }
+                        ]
+                    },
+                    "visual_review": None,
+                    "codegen_summary": {},
+                }
+            )
+
+            self.assertTrue(result["review_approved"])
+            self.assertEqual(result["failed_task_ids"], [])
+            self.assertNotIn("package-lock.json", " ".join(result["review_comments"]))
 
 
 

@@ -164,6 +164,7 @@ def create_remote_pr(
     config: AgentConfig,
     *,
     branch_name: str,
+    remote_url: str | None = None,
     github_client: GitHubClient | None = None,
     azure_client: AzureDevOpsClient | None = None,
 ) -> dict[str, Any]:
@@ -189,6 +190,16 @@ def create_remote_pr(
                 {
                     "reason": "missing_repo",
                     "message": "Pushed branch, but skipped GitHub PR creation because no repo was configured.",
+                }
+            )
+            return result
+        if remote_url and not _remote_matches_github_repo(remote_url, str(repo)):
+            result.update(
+                {
+                    "outcome": "skipped",
+                    "reason": "remote_not_github_repo",
+                    "message": f"Pushed branch, but skipped GitHub PR creation because origin remote '{remote_url}' does not target {repo}.",
+                    "error": None,
                 }
             )
             return result
@@ -281,6 +292,20 @@ def create_remote_pr(
         return result
 
     return result
+
+
+def _remote_matches_github_repo(remote_url: str, repo: str) -> bool:
+    normalized_remote = str(remote_url or "").strip().lower()
+    normalized_repo = str(repo or "").strip().lower().rstrip("/")
+    if not normalized_remote or not normalized_repo:
+        return False
+    candidate_suffixes = [
+        f"github.com/{normalized_repo}",
+        f"github.com/{normalized_repo}.git",
+        f"github.com:{normalized_repo}",
+        f"github.com:{normalized_repo}.git",
+    ]
+    return any(normalized_remote.endswith(suffix) for suffix in candidate_suffixes)
 
 
 def build_pr_title(state: dict[str, Any]) -> str:

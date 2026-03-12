@@ -30,6 +30,24 @@ class ExecutionMetricsArtifactTest(unittest.TestCase):
             self.assertTrue(artifact_path.exists())
             self.assertEqual(json.loads(artifact_path.read_text(encoding="utf-8")), metrics)
 
+    def test_persist_execution_metrics_normalizes_nested_sets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics = {
+                "schema_version": "execution-metrics/v1",
+                "run_id": "20260308T102233Z-deadbeef",
+                "testing": {
+                    "labels": {"script:typecheck", "script:visual-review"},
+                    "nested": [{"categories": {"desktop", "mobile"}}],
+                },
+            }
+
+            relative_path = persist_execution_metrics(temp_dir, "20260308T102233Z-deadbeef", metrics)
+
+            artifact_path = Path(temp_dir) / relative_path
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["testing"]["labels"], ["script:typecheck", "script:visual-review"])
+            self.assertEqual(payload["testing"]["nested"][0]["categories"], ["desktop", "mobile"])
+
     def test_plan_node_persists_metrics_artifact_and_returns_relative_path(self) -> None:
         planner_result = {
             "plan": "Inspect allowed files.",
@@ -38,7 +56,7 @@ class ExecutionMetricsArtifactTest(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as temp_dir, patch(
-            "ai_code_agent.agents.planner.PlannerAgent"
+            "ai_code_agent.agents.planner.PlanAgent"
         ) as mock_planner, patch("ai_code_agent.llm.client.LLMClient.from_config", return_value=object()):
             mock_planner.return_value.run.return_value = planner_result
             result = orchestrator.plan_node(

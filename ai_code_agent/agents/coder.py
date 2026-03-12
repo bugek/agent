@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from ai_code_agent.agents.base import BaseAgent
+from ai_code_agent.agents.base import BaseAgent, is_analysis_only_request
 from ai_code_agent.orchestrator import AgentState
 from ai_code_agent.llm.prompts import CODER_SYSTEM_PROMPT
 from ai_code_agent.tools.edit_policy import evaluate_edit_path, filter_edit_paths, summarize_edit_policy
@@ -38,7 +38,8 @@ class CoderAgent(BaseAgent):
         workspace_profile = state.get("workspace_profile") or detect_workspace_profile(state["workspace_dir"])
         remediation_context = self._remediation_context(state)
         version_resolution = self._version_resolution(state)
-        if remediation_context is None:
+        allow_deterministic_retry = remediation_context is not None and self._can_use_deterministic_nextjs_retry(state)
+        if remediation_context is None or allow_deterministic_retry:
             dependency_upgrade_operations = self._build_nextjs_dependency_upgrade_operations(
                 state,
                 workspace_profile,
@@ -80,15 +81,20 @@ class CoderAgent(BaseAgent):
             self.config.edit_allow_globs,
             self.config.edit_deny_globs,
         )
+        candidate_files = self._filter_out_of_scope(candidate_files, state)
         file_context = []
         for file_path in candidate_files:
             excerpt = editor.view_file(file_path)
             file_context.append({"file_path": file_path, "content": excerpt[:4000]})
 
+        active_tasks = self._active_tasks(state)
+        scope = self._task_scope(state)
         prompt_payload = {
             "issue": state["issue_description"],
             "plan": state.get("plan"),
             "edit_intent": self._edit_intent(state),
+            "scope": scope,
+            "tasks": active_tasks,
             "workspace_profile": workspace_profile,
             "design_brief": self._frontend_design_brief(state),
             "version_resolution": version_resolution,
@@ -116,10 +122,11 @@ class CoderAgent(BaseAgent):
             },
         }
         response = self.llm.generate_json(CODER_SYSTEM_PROMPT, json.dumps(prompt_payload, indent=2))
+        normalized_operations = self._normalize_operations(response.get("operations", []), editor, state)
         result = self._apply_operations(
             editor,
             state,
-            response.get("operations", []),
+            normalized_operations,
             generated_by="llm",
             remediation_context=remediation_context,
         )
@@ -155,6 +162,14 @@ class CoderAgent(BaseAgent):
                         }
                     )
                     continue
+                if self._is_out_of_scope(file_path, state):
+                    blocked_operations.append(
+                        {
+                            "file_path": file_path.replace("\\", "/"),
+                            "reason": "blocked by task scope out_of_scope",
+                        }
+                    )
+                    continue
             patch = self._apply_operation(editor, state, operation)
             if patch is not None:
                 patches.append(patch)
@@ -186,6 +201,89 @@ class CoderAgent(BaseAgent):
                 "remediation_focus_count": len(remediation_context.get("focus_areas", [])) if remediation_context else 0,
             },
         }
+
+    def _normalize_operations(self, operations: object, editor: FileEditor, state: AgentState) -> list[dict[str, Any]]:
+        if not isinstance(operations, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        for item in operations:
+            if not isinstance(item, dict):
+                continue
+            operation = dict(item)
+            file_path = operation.get("file_path")
+            operation_type = operation.get("type")
+            if (
+                isinstance(file_path, str)
+                and file_path.replace("\\", "/") == "package.json"
+                and operation_type in {"create_file", "write_file"}
+                and isinstance(operation.get("content"), str)
+            ):
+                operation["content"] = self._normalize_package_json_content(
+                    operation["content"],
+                    editor,
+                    allow_version_changes=is_dependency_upgrade_request(state["issue_description"]),
+                )
+            normalized.append(operation)
+        return normalized
+
+    def _normalize_package_json_content(self, content: str, editor: FileEditor, *, allow_version_changes: bool = False) -> str:
+        try:
+            package_data = json.loads(content)
+        except json.JSONDecodeError:
+            return content
+
+        if not isinstance(package_data, dict):
+            return content
+
+        existing_package = {}
+        if editor.exists("package.json"):
+            try:
+                existing_package = json.loads(editor.view_file("package.json"))
+            except json.JSONDecodeError:
+                existing_package = {}
+
+        for scalar_key in ["name", "version", "private"]:
+            if not allow_version_changes and scalar_key in existing_package:
+                package_data[scalar_key] = existing_package[scalar_key]
+
+        for section in ["dependencies", "devDependencies"]:
+            current = package_data.get(section)
+            existing = existing_package.get(section)
+            normalized_current = {str(key): value for key, value in current.items()} if isinstance(current, dict) else {}
+            normalized_existing = {str(key): value for key, value in existing.items()} if isinstance(existing, dict) else {}
+            if allow_version_changes:
+                merged = dict(normalized_current or normalized_existing)
+            else:
+                merged = dict(normalized_existing)
+                for key, value in normalized_current.items():
+                    if key not in normalized_existing or key == "reactflow":
+                        merged[key] = value
+            if merged:
+                package_data[section] = merged
+            elif section in package_data:
+                del package_data[section]
+
+        current_scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+        existing_scripts = existing_package.get("scripts") if isinstance(existing_package.get("scripts"), dict) else {}
+        if allow_version_changes:
+            merged_scripts = {str(key): value for key, value in current_scripts.items()}
+        else:
+            merged_scripts = {str(key): value for key, value in existing_scripts.items()}
+            for key, value in current_scripts.items():
+                if key not in merged_scripts:
+                    merged_scripts[str(key)] = value
+        if merged_scripts:
+            package_data["scripts"] = merged_scripts
+
+        return json.dumps(package_data, indent=2, ensure_ascii=True) + "\n"
+
+    def _can_use_deterministic_nextjs_retry(self, state: AgentState) -> bool:
+        workspace_profile = state.get("workspace_profile") if isinstance(state.get("workspace_profile"), dict) else {}
+        if not isinstance(workspace_profile.get("nextjs"), dict):
+            return False
+        issue = state.get("issue_description") if isinstance(state.get("issue_description"), str) else ""
+        return self._issue_requests_react_flow(issue)
 
     def _candidate_files_for_prompt(
         self,
@@ -263,13 +361,18 @@ class CoderAgent(BaseAgent):
                 for item in remediation.get("guidance", [])
                 if isinstance(item, str) and item
             ],
+            "task_remediation": [
+                item
+                for item in remediation.get("task_remediation", [])
+                if isinstance(item, dict) and isinstance(item.get("task_id"), str) and item.get("task_id")
+            ],
             "testing_summary": state.get("testing_summary") if isinstance(state.get("testing_summary"), dict) else {},
         }
         workspace_profile = state.get("workspace_profile") if isinstance(state.get("workspace_profile"), dict) else {}
         context["focus_areas"] = self._expand_nextjs_route_bundle_files(context["focus_areas"], workspace_profile)
         if not any(
             context[key]
-            for key in ["failed_validation_labels", "blocked_file_paths", "failed_operations", "focus_areas", "guidance"]
+            for key in ["failed_validation_labels", "blocked_file_paths", "failed_operations", "focus_areas", "guidance", "task_remediation"]
         ):
             return None
         return context
@@ -295,6 +398,53 @@ class CoderAgent(BaseAgent):
                 ]
             normalized.append(normalized_item)
         return normalized[:10]
+
+    def _task_scope(self, state: AgentState) -> dict[str, list[str]]:
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        scope = planning_context.get("scope") if isinstance(planning_context.get("scope"), dict) else {}
+        return {
+            "in_scope": [
+                item for item in scope.get("in_scope", []) if isinstance(item, str) and item
+            ],
+            "out_of_scope": [
+                item for item in scope.get("out_of_scope", []) if isinstance(item, str) and item
+            ],
+        }
+
+    def _active_tasks(self, state: AgentState) -> list[dict[str, Any]]:
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        tasks = planning_context.get("tasks") if isinstance(planning_context.get("tasks"), list) else []
+        failed_task_ids = set(state.get("failed_task_ids") or [])
+        task_statuses = state.get("task_statuses") if isinstance(state.get("task_statuses"), dict) else {}
+        active: list[dict[str, Any]] = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("id")
+            if not isinstance(task_id, str):
+                continue
+            status = task_statuses.get(task_id, task.get("status", "pending"))
+            if status == "completed" and task_id not in failed_task_ids:
+                continue
+            active.append(dict(task, status="pending"))
+        return active
+
+    def _is_out_of_scope(self, file_path: str, state: AgentState) -> bool:
+        scope = self._task_scope(state)
+        out_of_scope = scope.get("out_of_scope", [])
+        if not out_of_scope:
+            return False
+        normalized = file_path.replace("\\", "/")
+        for pattern in out_of_scope:
+            pattern_normalized = pattern.replace("\\", "/").rstrip("/")
+            if normalized == pattern_normalized:
+                return True
+            if normalized.startswith(pattern_normalized + "/"):
+                return True
+        return False
+
+    def _filter_out_of_scope(self, candidate_files: list[str], state: AgentState) -> list[str]:
+        return [f for f in candidate_files if not self._is_out_of_scope(f, state)]
 
     def _exists(self, state: AgentState, file_path: str) -> bool:
         path = Path(state["workspace_dir"]) / file_path
@@ -368,7 +518,7 @@ class CoderAgent(BaseAgent):
         return f"{operation_type} failed for {file_path}"
 
     def _is_analysis_only(self, issue: str) -> bool:
-        return bool(re.search(r"\b(analyze|inspect|summari[sz]e|review|readiness)\b", issue, re.I))
+        return is_analysis_only_request(issue)
 
     def _build_nextjs_operations(
         self,
@@ -393,22 +543,100 @@ class CoderAgent(BaseAgent):
         operations: list[dict[str, Any]] = []
 
         component_request = self._extract_component_request(issue, route_slug)
-        component_file = self._resolve_component_file(nextjs_profile, component_request)
 
         wants_page = bool(re.search(r"\b(page|screen|view)\b", lower_issue))
         wants_layout = bool(re.search(r"\b(layout|shell|wrapper)\b", lower_issue))
         wants_api_route = bool(re.search(r"\b(api|route handler|endpoint|handler)\b", lower_issue))
         wants_component = component_request is not None or bool(re.search(r"\b(component|card|hero|section|form|modal|panel|table|list)\b", lower_issue))
+        wants_react_flow = self._issue_requests_react_flow(issue)
+
+        if wants_react_flow and route_slug:
+            component_request = self._preferred_reactflow_component_request(component_request, route_slug)
+
+        component_file = self._resolve_component_file(nextjs_profile, component_request)
+
+        if wants_react_flow and editor.exists("package.json") and self._is_explicit_nextjs_target("package.json", state):
+            package_json_content = editor.view_file("package.json")
+            updated_package_json = self._ensure_package_dependency(package_json_content, "reactflow", "^11.11.4")
+            if updated_package_json != package_json_content:
+                operations.append(
+                    self._file_operation(editor, "package.json", updated_package_json, preferred_action="write_file")
+                )
+
+        reactflow_component_file = self._resolve_reactflow_component_file(nextjs_profile, route_slug) if wants_react_flow else None
+        graph_types_file = self._resolve_graph_types_file() if wants_react_flow else None
+        graph_data_file = self._resolve_graph_data_file() if wants_react_flow else None
+        graph_component_files = self._resolve_graph_component_files(nextjs_profile) if wants_react_flow else {}
+
+        if wants_react_flow and reactflow_component_file is not None:
+            if graph_types_file is not None:
+                operations.append(
+                    self._file_operation(
+                        editor,
+                        graph_types_file,
+                        self._graph_types_template(),
+                        preferred_action=action,
+                    )
+                )
+            if graph_data_file is not None:
+                operations.append(
+                    self._file_operation(
+                        editor,
+                        graph_data_file,
+                        self._graph_data_template(),
+                        preferred_action=action,
+                    )
+                )
+            for support_file, template in self._graph_support_operations(graph_component_files, reactflow_component_file).items():
+                operations.append(
+                    self._file_operation(
+                        editor,
+                        support_file,
+                        template,
+                        preferred_action=action,
+                    )
+                )
+            operations.append(
+                self._file_operation(
+                    editor,
+                    reactflow_component_file,
+                    self._next_reactflow_workspace_template(route_slug, issue, design_brief),
+                    preferred_action=action,
+                )
+            )
 
         if wants_component and component_file is not None:
             operations.append(
                 self._file_operation(
                     editor,
                     component_file,
-                    self._next_component_template(component_request or "Feature Section", issue, route_slug, design_brief),
+                    self._next_component_template(
+                        component_request or "Feature Section",
+                        issue,
+                        route_slug,
+                        design_brief,
+                        reactflow_component_file=reactflow_component_file,
+                    ),
                     preferred_action=action,
                 )
             )
+
+        if wants_react_flow:
+            root_preview_file = self._resolve_root_preview_file(nextjs_profile)
+            if (
+                root_preview_file
+                and root_preview_file != self._resolve_next_page_file(nextjs_profile, route_slug)
+                and editor.exists(root_preview_file)
+                and self._is_explicit_nextjs_target(root_preview_file, state)
+            ):
+                operations.append(
+                    self._file_operation(
+                        editor,
+                        root_preview_file,
+                        self._next_graph_home_preview_template(route_slug, issue, design_brief),
+                        preferred_action="write_file",
+                    )
+                )
 
         if not editor.exists(".gitignore"):
             operations.append(
@@ -481,6 +709,24 @@ class CoderAgent(BaseAgent):
 
         return deduplicated
 
+    def _is_explicit_nextjs_target(self, file_path: str, state: AgentState) -> bool:
+        normalized_target = file_path.replace("\\", "/")
+        if any(isinstance(candidate, str) and candidate.replace("\\", "/") == normalized_target for candidate in state.get("files_to_edit", [])):
+            return True
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        planning_scope = planning_context.get("scope") if isinstance(planning_context.get("scope"), dict) else {}
+        if any(isinstance(candidate, str) and candidate.replace("\\", "/") == normalized_target for candidate in planning_scope.get("in_scope", [])):
+            return True
+        for task in planning_context.get("tasks", []) if isinstance(planning_context.get("tasks"), list) else []:
+            if not isinstance(task, dict):
+                continue
+            if any(isinstance(candidate, str) and candidate.replace("\\", "/") == normalized_target for candidate in task.get("target_files", [])):
+                return True
+        remediation_context = self._remediation_context(state)
+        if remediation_context and any(isinstance(candidate, str) and candidate.replace("\\", "/") == normalized_target for candidate in remediation_context.get("focus_areas", [])):
+            return True
+        return False
+
     def _version_resolution(self, state: AgentState) -> dict[str, Any] | None:
         planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
         version_resolution = planning_context.get("version_resolution")
@@ -538,6 +784,27 @@ class CoderAgent(BaseAgent):
                 package_data["dependencies"] = {}
                 dependencies = package_data["dependencies"]
             dependencies[package_name] = version
+
+        return json.dumps(package_data, indent=2, ensure_ascii=True) + "\n"
+
+    def _ensure_package_dependency(self, package_json_content: str, package_name: str, version: str, *, dev: bool = False) -> str:
+        try:
+            package_data = json.loads(package_json_content)
+        except json.JSONDecodeError:
+            return package_json_content
+
+        target_section = "devDependencies" if dev else "dependencies"
+        target_dependencies = package_data.get(target_section)
+        if not isinstance(target_dependencies, dict):
+            target_dependencies = {}
+            package_data[target_section] = target_dependencies
+
+        target_dependencies[package_name] = version
+
+        other_section = "dependencies" if dev else "devDependencies"
+        other_dependencies = package_data.get(other_section)
+        if isinstance(other_dependencies, dict) and package_name in other_dependencies:
+            del other_dependencies[package_name]
 
         return json.dumps(package_data, indent=2, ensure_ascii=True) + "\n"
 
@@ -726,7 +993,18 @@ class CoderAgent(BaseAgent):
         }
 
     def _extract_route_slug(self, issue: str) -> str:
-        sanitized_issue = self._sanitize_issue_for_route_detection(issue)
+        structured_title = self._extract_issue_section(issue, "title")
+        structured_description = self._extract_issue_section(issue, "description")
+
+        candidates = [segment for segment in [structured_title, structured_description, issue] if isinstance(segment, str) and segment.strip()]
+        for candidate in candidates:
+            extracted = self._extract_route_slug_from_text(candidate)
+            if extracted:
+                return extracted
+        return "feature"
+
+    def _extract_route_slug_from_text(self, text: str) -> str | None:
+        sanitized_issue = self._sanitize_issue_for_route_detection(text)
         explicit_match = re.search(r"(?:(?:path|route|url|page)\s+)?/([a-z0-9\-/]+)", sanitized_issue)
         if explicit_match:
             return explicit_match.group(1).strip("/")
@@ -736,6 +1014,7 @@ class CoderAgent(BaseAgent):
             return phrase_match.group(1)
 
         preferred_terms = [
+            "github",
             "dashboard",
             "admin",
             "settings",
@@ -753,7 +1032,17 @@ class CoderAgent(BaseAgent):
                 return term
 
         tokens = [token for token in re.findall(r"[a-z0-9-]+", lower_issue) if token not in {"add", "create", "update", "new", "next", "component", "page", "layout", "api", "route", "handler"}]
-        return tokens[0] if tokens else "feature"
+        return tokens[0] if tokens else None
+
+    def _extract_issue_section(self, issue: str, label: str) -> str | None:
+        if not isinstance(issue, str) or not issue.strip():
+            return None
+        pattern = rf"^\s*{re.escape(label)}\s*:\s*(.+)$"
+        match = re.search(pattern, issue, re.IGNORECASE | re.MULTILINE)
+        if not match:
+            return None
+        value = match.group(1).strip()
+        return value or None
 
     def _sanitize_issue_for_route_detection(self, issue: str) -> str:
         sanitized = re.sub(r"https?://\S+", " ", issue.lower())
@@ -765,6 +1054,17 @@ class CoderAgent(BaseAgent):
         for file_path in state.get("files_to_edit", []):
             if isinstance(file_path, str):
                 focus_files.append(file_path)
+        planning_context = state.get("planning_context") if isinstance(state.get("planning_context"), dict) else {}
+        planning_scope = planning_context.get("scope") if isinstance(planning_context.get("scope"), dict) else {}
+        for file_path in planning_scope.get("in_scope", []):
+            if isinstance(file_path, str):
+                focus_files.append(file_path)
+        for task in planning_context.get("tasks", []) if isinstance(planning_context.get("tasks"), list) else []:
+            if not isinstance(task, dict):
+                continue
+            for file_path in task.get("target_files", []):
+                if isinstance(file_path, str):
+                    focus_files.append(file_path)
         remediation_context = self._remediation_context(state)
         if remediation_context:
             for file_path in remediation_context.get("focus_areas", []):
@@ -774,17 +1074,31 @@ class CoderAgent(BaseAgent):
         route_slug = self._route_slug_from_files(focus_files, nextjs_profile)
         if route_slug is not None:
             return route_slug
-        return self._extract_route_slug(state["issue_description"])
+        issue_route_slug = self._extract_route_slug(state["issue_description"])
+        return issue_route_slug
 
     def _route_slug_from_files(self, file_paths: list[str], nextjs_profile: dict[str, Any]) -> str | None:
         app_dir = (nextjs_profile.get("app_dir") or "app").replace("\\", "/")
         pages_dir = (nextjs_profile.get("pages_dir") or "pages").replace("\\", "/")
+        normalized_paths = [file_path.replace("\\", "/") for file_path in file_paths if isinstance(file_path, str)]
+        for normalized in normalized_paths:
+            if normalized.startswith(f"{app_dir}/") and normalized.endswith("/page.tsx"):
+                slug = normalized[len(app_dir) + 1 : -len("/page.tsx")]
+                if slug:
+                    return slug
+        for normalized in normalized_paths:
+            stripped = normalized.rstrip("/")
+            if stripped.startswith(f"{app_dir}/") and "/" not in stripped[len(app_dir) + 1:]:
+                route_segment = stripped[len(app_dir) + 1:]
+                if route_segment and Path(route_segment).suffix == "":
+                    return route_segment
         for file_path in file_paths:
             normalized = file_path.replace("\\", "/")
+            stripped = normalized.rstrip("/")
+            if stripped == app_dir:
+                return ""
             if normalized == f"{app_dir}/page.tsx":
                 return ""
-            if normalized.startswith(f"{app_dir}/") and normalized.endswith("/page.tsx"):
-                return normalized[len(app_dir) + 1 : -len("/page.tsx")]
             if normalized == f"{pages_dir}/index.tsx":
                 return ""
             if normalized.startswith(f"{pages_dir}/") and normalized.endswith(".tsx"):
@@ -867,6 +1181,47 @@ class CoderAgent(BaseAgent):
         file_name = self._slugify(component_request)
         return f"{target_dir}/{file_name}.tsx"
 
+    def _preferred_reactflow_component_request(self, component_request: str | None, route_slug: str) -> str:
+        route_section = self._humanize_identifier(f"{route_slug.split('/')[-1]} section")
+        if not component_request:
+            return route_section
+        lowered = component_request.lower()
+        if any(token in lowered for token in ["layout", "page", "route", "view", "screen"]):
+            return route_section
+        return component_request
+
+    def _resolve_reactflow_component_file(self, nextjs_profile: dict[str, Any], route_slug: str) -> str | None:
+        component_dirs = nextjs_profile.get("component_directories", [])
+        target_dir = component_dirs[0] if component_dirs else "components"
+        route_name = route_slug.split("/")[-1] if route_slug else "home"
+        return f"{target_dir}/react-flow/{self._slugify(route_name)}-react-flow-workspace.tsx"
+
+    def _resolve_graph_types_file(self) -> str:
+        return "components/graph/types.ts"
+
+    def _resolve_graph_data_file(self) -> str:
+        return "components/graph/graph-data.ts"
+
+    def _resolve_graph_component_files(self, nextjs_profile: dict[str, Any]) -> dict[str, str]:
+        component_dirs = nextjs_profile.get("component_directories", [])
+        target_dir = component_dirs[0] if component_dirs else "components"
+        graph_dir = f"{target_dir}/graph"
+        return {
+            "workspace": f"{graph_dir}/GraphWorkspace.tsx",
+            "legend": f"{graph_dir}/GraphLegend.tsx",
+            "summary": f"{graph_dir}/GraphSummary.tsx",
+            "empty": f"{graph_dir}/GraphEmptyState.tsx",
+        }
+
+    def _resolve_root_preview_file(self, nextjs_profile: dict[str, Any]) -> str | None:
+        if nextjs_profile.get("router_type") == "app":
+            app_dir = nextjs_profile.get("app_dir") or "app"
+            return f"{app_dir}/page.tsx"
+        if nextjs_profile.get("router_type") == "pages":
+            pages_dir = nextjs_profile.get("pages_dir") or "pages"
+            return f"{pages_dir}/index.tsx"
+        return None
+
     def _resolve_next_page_file(self, nextjs_profile: dict[str, Any], route_slug: str) -> str | None:
         router_type = nextjs_profile.get("router_type")
         if router_type == "app":
@@ -923,21 +1278,22 @@ class CoderAgent(BaseAgent):
             f"        <p style={{pageStyles.eyebrow}}>{design['eyebrow']}</p>",
             f"        <h1 style={{pageStyles.title}}>{page_name}</h1>",
             f"        <p style={{pageStyles.description}}>{design['description']}</p>",
+            '        <p style={pageStyles.note}>Demo content preview until live data is connected.</p>',
             "      </section>",
         ]
         if component_file is not None:
             import_path = self._relative_import(page_file, component_file)
             imports.append(f'import {{ {component_name} }} from "{import_path}";')
-            body_lines.append(f"      <{component_name} state=\"ready\" items={{previewItems}} />")
+            body_lines.append(f"      <{component_name} state=\"ready\" items={{sampleItems}} />")
         body_lines.append("    </main>")
 
         import_block = "\n".join(imports)
         if import_block:
             import_block += "\n\n"
         return (
-            f"{import_block}const previewItems = [\n"
-            f"  {{ label: \"Primary signal\", value: \"{design['primary_metric']}\", detail: \"{design['metric_caption']}\" }},\n"
-            f"  {{ label: \"Momentum\", value: \"{design['secondary_metric']}\", detail: \"{design['secondary_caption']}\" }},\n"
+            f"{import_block}const sampleItems = [\n"
+            f"  {{ label: \"Sample metric\", value: \"{design['primary_metric']}\", detail: \"{design['metric_caption']}\" }},\n"
+            f"  {{ label: \"Example trend\", value: \"{design['secondary_metric']}\", detail: \"{design['secondary_caption']}\" }},\n"
             "];\n\n"
             "const pageStyles = {\n"
             f"  shell: {{ minHeight: \"100vh\", padding: \"4rem 1.5rem\", background: \"{design['background']}\", color: \"{design['text']}\" }},\n"
@@ -945,6 +1301,7 @@ class CoderAgent(BaseAgent):
             f"  eyebrow: {{ margin: 0, textTransform: \"uppercase\", letterSpacing: \"0.18em\", fontSize: \"0.72rem\", color: \"{design['accent']}\" }},\n"
             "  title: { margin: \"0.75rem 0 0\", fontSize: \"clamp(2.5rem, 6vw, 4.75rem)\", lineHeight: 0.95 },\n"
             f"  description: {{ maxWidth: \"42rem\", margin: \"1rem 0 0\", fontSize: \"1.05rem\", color: \"{design['muted']}\" }},\n"
+            f"  note: {{ margin: \"1rem 0 0\", fontSize: \"0.9rem\", color: \"{design['muted']}\" }},\n"
             "};\n\n"
             f"export default function {self._to_component_name(page_name)}Page() {{\n"
             "  return (\n"
@@ -981,10 +1338,26 @@ class CoderAgent(BaseAgent):
             "}\n"
         )
 
-    def _next_component_template(self, component_request: str, issue: str, route_slug: str, design_brief: dict[str, Any] | None = None) -> str:
+    def _next_component_template(
+        self,
+        component_request: str,
+        issue: str,
+        route_slug: str,
+        design_brief: dict[str, Any] | None = None,
+        reactflow_component_file: str | None = None,
+    ) -> str:
         component_name = self._to_component_name(component_request)
         title = self._humanize_identifier(component_request)
         design = self._next_design_direction(issue, route_slug or component_request, design_brief)
+        if reactflow_component_file is not None:
+            return self._next_reactflow_section_template(
+                component_name,
+                title,
+                issue,
+                route_slug,
+                reactflow_component_file,
+                design_brief,
+            )
         return (
             f"type {component_name}State = \"loading\" | \"empty\" | \"error\" | \"ready\";\n\n"
             f"type {component_name}Item = {{\n"
@@ -1074,12 +1447,12 @@ class CoderAgent(BaseAgent):
             '  error: Error;\n'
             '  reset: () => void;\n'
             '};\n\n'
-            "export default function ErrorBoundary({ error, reset }: ErrorProps) {\n"
+            "export default function ErrorBoundary({ error: _error, reset }: ErrorProps) {\n"
             "  return (\n"
             f"    <div style={{{{ padding: \"2rem\", borderRadius: \"24px\", background: \"{design['panel']}\", color: \"{design['text']}\" }}}}>\n"
             f"      <h2>{design['error_title']}</h2>\n"
             f"      <p style={{{{ color: \"{design['muted']}\" }}}}>{design['error_copy']}</p>\n"
-            '      <p style={{ color: "#b91c1c" }}>{error.message}</p>\n'
+            '      <p style={{ color: "#b91c1c" }}>Try again, and if the problem continues, inspect the latest logs or server response.</p>\n'
             '      <button type="button" onClick={reset} style={{ marginTop: "1rem" }}>Try again</button>\n'
             "    </div>\n"
             "  );\n"
@@ -1099,10 +1472,10 @@ class CoderAgent(BaseAgent):
                 "accent": "#0f766e",
                 "text": "#1f2937",
                 "muted": "#5b6470",
-                "primary_metric": "$128k",
-                "secondary_metric": "+18%",
-                "metric_caption": "Net uplift since the last release window.",
-                "secondary_caption": "Week-on-week momentum across the main surface.",
+                "primary_metric": "Example value",
+                "secondary_metric": "Sample trend",
+                "metric_caption": "Placeholder content to show hierarchy before live data is connected.",
+                "secondary_caption": "Replace with a real data source or clearer product copy before shipping.",
                 "loading_copy": "Loading the latest signals and arranging the board.",
                 "empty_copy": "No highlights are available yet. Connect a data source or publish the first event.",
                 "error_title": "Something interrupted the signal feed",
@@ -1139,10 +1512,10 @@ class CoderAgent(BaseAgent):
                 "accent": "#b45309",
                 "text": "#2f241c",
                 "muted": "#6b5a4a",
-                "primary_metric": "24 live",
-                "secondary_metric": "4 queues",
-                "metric_caption": "Primary content is surfaced above the fold.",
-                "secondary_caption": "Supporting actions stay visible without crowding the layout.",
+                "primary_metric": "Example value",
+                "secondary_metric": "Sample status",
+                "metric_caption": "Use this area for clearly labeled sample content or real data.",
+                "secondary_caption": "Avoid authoritative-looking operational numbers until the surface is wired to live data.",
                 "loading_copy": "Preparing the surface and staging the first interaction states.",
                 "empty_copy": "This section is ready, but it has no content yet. Add the first record to bring it to life.",
                 "error_title": "This section needs another pass",
@@ -1179,6 +1552,313 @@ class CoderAgent(BaseAgent):
             )
 
         return design
+
+    def _issue_requests_react_flow(self, issue: str) -> bool:
+        lowered = issue.lower()
+        return bool(re.search(r"react\s*flow|reactflow", lowered)) or "graph workspace" in lowered
+
+    def _next_reactflow_section_template(
+        self,
+        component_name: str,
+        title: str,
+        issue: str,
+        route_slug: str,
+        reactflow_component_file: str,
+        design_brief: dict[str, Any] | None = None,
+    ) -> str:
+        design = self._next_design_direction(issue, route_slug or title, design_brief)
+        import_path = self._relative_import(
+            f"components/{self._slugify(component_name)}.tsx",
+            reactflow_component_file,
+        )
+        workspace_component = Path(reactflow_component_file).stem
+        workspace_component_name = self._to_component_name(workspace_component)
+        return (
+            f'import {{ {workspace_component_name} }} from "{import_path}";\n\n'
+            f"type {component_name}State = \"loading\" | \"empty\" | \"error\" | \"ready\";\n\n"
+            f"type {component_name}Item = {{\n"
+            "  label: string;\n"
+            "  value: string;\n"
+            "  detail?: string;\n"
+            "};\n\n"
+            f"type {component_name}Props = {{\n"
+            f"  state?: {component_name}State;\n"
+            f"  items?: {component_name}Item[];\n"
+            "};\n\n"
+            "const sectionStyles = {\n"
+            f"  shell: {{ borderRadius: \"28px\", padding: \"1.5rem\", background: \"{design['panel']}\", color: \"{design['text']}\", boxShadow: \"0 24px 60px rgba(15, 23, 42, 0.12)\" }},\n"
+            f"  eyebrow: {{ margin: 0, textTransform: \"uppercase\", letterSpacing: \"0.16em\", fontSize: \"0.72rem\", color: \"{design['accent']}\" }},\n"
+            "  title: { margin: \"0.5rem 0 0\", fontSize: \"1.5rem\" },\n"
+            f"  description: {{ margin: \"0.75rem 0 0\", color: \"{design['muted']}\" }},\n"
+            f"  statePanel: {{ marginTop: \"1.5rem\", padding: \"1.25rem\", borderRadius: \"20px\", background: \"{design['surface']}\", color: \"{design['muted']}\" }},\n"
+            "  workspace: { marginTop: \"1.5rem\" },\n"
+            "};\n\n"
+            f"export function {component_name}({{ state = \"ready\", items = [] }}: {component_name}Props) {{\n"
+            "  if (state === \"loading\") {\n"
+            "    return (\n"
+            "      <section style={sectionStyles.shell}>\n"
+            f"        <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"        <p style={{sectionStyles.description}}>{design['loading_copy']}</p>\n"
+            "      </section>\n"
+            "    );\n"
+            "  }\n\n"
+            "  if (state === \"error\") {\n"
+            "    return (\n"
+            "      <section style={sectionStyles.shell}>\n"
+            f"        <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"        <div style={{sectionStyles.statePanel}}>{design['error_copy']}</div>\n"
+            "      </section>\n"
+            "    );\n"
+            "  }\n\n"
+            "  if (state === \"empty\" || items.length === 0) {\n"
+            "    return (\n"
+            "      <section style={sectionStyles.shell}>\n"
+            f"        <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"        <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"        <div style={{sectionStyles.statePanel}}>{design['empty_copy']}</div>\n"
+            "      </section>\n"
+            "    );\n"
+            "  }\n\n"
+            "  return (\n"
+            "    <section style={sectionStyles.shell}>\n"
+            f"      <p style={{sectionStyles.eyebrow}}>{design['eyebrow']}</p>\n"
+            f"      <h2 style={{sectionStyles.title}}>{title}</h2>\n"
+            f"      <p style={{sectionStyles.description}}>{design['success_copy']}</p>\n"
+            "      <div style={sectionStyles.workspace}>\n"
+            f"        <{workspace_component_name} />\n"
+            "      </div>\n"
+            "    </section>\n"
+            "  );\n"
+            "}\n"
+        )
+
+    def _next_reactflow_workspace_template(self, route_slug: str, issue: str, design_brief: dict[str, Any] | None = None) -> str:
+        design = self._next_design_direction(issue, route_slug or "graph", design_brief)
+        workspace_name = self._to_component_name(f"{route_slug.split('/')[-1] if route_slug else 'home'} react flow workspace")
+        return (
+            '"use client";\n\n'
+            'import { useMemo, useState } from "react";\n'
+            'import ReactFlow, { Background, Controls, MarkerType, MiniMap, type Edge, type Node, type OnSelectionChangeParams } from "reactflow";\n'
+            'import "reactflow/dist/style.css";\n\n'
+            'import { graphEdges, graphNodes, graphToneByKind } from "../graph/graph-data";\n'
+            'import type { GraphNodeData, GraphNodeKind } from "../graph/types";\n\n'
+            'const toneByKind: Record<GraphNodeKind, { background: string; color: string; border: string }> = graphToneByKind;\n\n'
+            'const nodes: Node<GraphNodeData>[] = graphNodes.map((node) => ({\n'
+            '  ...node,\n'
+            '  style: { ...toneByKind[node.data.kind], borderRadius: 18, padding: 12, width: node.style?.width ?? 180, boxShadow: node.data.kind === "pipeline" ? "0 10px 30px rgba(47, 36, 28, 0.08)" : undefined },\n'
+            '}));\n\n'
+            'const edges: Edge[] = graphEdges.map((edge) => ({\n'
+            '  ...edge,\n'
+            '  markerEnd: { type: MarkerType.ArrowClosed },\n'
+            '}));\n\n'
+            'const styles = {\n'
+            '  shell: { display: "grid", gap: "1rem" },\n'
+            '  frame: { height: "min(68vh, 42rem)", minHeight: "26rem", borderRadius: "28px", overflow: "hidden", border: "1px solid rgba(139, 94, 60, 0.18)", background: "linear-gradient(180deg, rgba(255, 250, 245, 0.98) 0%, rgba(245, 237, 227, 0.96) 100%)", boxShadow: "0 24px 60px rgba(47, 36, 28, 0.1)" },\n'
+            '  detailGrid: { display: "grid", gap: "1rem", gridTemplateColumns: "repeat(auto-fit, minmax(15rem, 1fr))" },\n'
+            '  detailCard: { borderRadius: "22px", padding: "1rem", background: "rgba(255, 250, 245, 0.92)", border: "1px solid rgba(139, 94, 60, 0.14)" },\n'
+            f'  label: {{ margin: 0, textTransform: "uppercase", letterSpacing: "0.14em", fontSize: "0.7rem", color: "{design["accent"]}" }},\n'
+            f'  value: {{ margin: "0.5rem 0 0", fontSize: "1.1rem", color: "{design["text"]}", fontWeight: 700 }},\n'
+            f'  small: {{ margin: "0.5rem 0 0", color: "{design["muted"]}", lineHeight: 1.55 }},\n'
+            '};\n\n'
+            f'export function {workspace_name}() {{\n'
+            '  const [selectedNodeId, setSelectedNodeId] = useState<string>("pipeline");\n\n'
+            '  const fallbackNode = nodes.find((node) => node.id === "pipeline") ?? nodes[0];\n'
+            '  const selectedNode = useMemo<Node<GraphNodeData>>(() => nodes.find((node) => node.id === selectedNodeId) ?? fallbackNode, [selectedNodeId]);\n\n'
+            '  const handleSelectionChange = ({ nodes: selectedNodes }: OnSelectionChangeParams) => {\n'
+            '    const firstSelectedNode = selectedNodes[0];\n'
+            '    if (firstSelectedNode) {\n'
+            '      setSelectedNodeId(firstSelectedNode.id);\n'
+            '    }\n'
+            '  };\n\n'
+            '  return (\n'
+            '    <section style={styles.shell}>\n'
+            '      <div style={styles.frame}>\n'
+            '        <ReactFlow\n'
+            '          nodes={nodes}\n'
+            '          edges={edges}\n'
+            '          fitView\n'
+            '          minZoom={0.6}\n'
+            '          maxZoom={1.4}\n'
+            '          nodesDraggable={false}\n'
+            '          nodesConnectable={false}\n'
+            '          onSelectionChange={handleSelectionChange}\n'
+            '          proOptions={{ hideAttribution: true }}\n'
+            '        >\n'
+            '          <MiniMap pannable zoomable style={{ background: "rgba(255,250,245,0.95)", border: "1px solid rgba(139,94,60,0.14)" }} />\n'
+            '          <Controls showInteractive={false} />\n'
+            '          <Background color="#d6c4b2" gap={18} />\n'
+            '        </ReactFlow>\n'
+            '      </div>\n'
+            '      <div style={styles.detailGrid}>\n'
+            '        <article style={styles.detailCard}>\n'
+            '          <p style={styles.label}>Selected node</p>\n'
+            '          <p style={styles.value}>{selectedNode.data.label}</p>\n'
+            '          <p style={styles.small}>{selectedNode.data.summary}</p>\n'
+            '        </article>\n'
+            '        <article style={styles.detailCard}>\n'
+            '          <p style={styles.label}>Demo note</p>\n'
+            '          <p style={styles.small}>This workspace uses typed sample data to demonstrate the React Flow surface until a live data source is connected.</p>\n'
+            '        </article>\n'
+            '      </div>\n'
+            '    </section>\n'
+            '  );\n'
+            '}\n'
+        )
+
+    def _graph_types_template(self) -> str:
+        return (
+            'export type GraphNodeKind = "source" | "pipeline" | "destination";\n\n'
+            'export type GraphNodeData = {\n'
+            '  label: string;\n'
+            '  summary: string;\n'
+            '  kind: GraphNodeKind;\n'
+            '};\n\n'
+            'export type GraphSummaryItem = {\n'
+            '  label: string;\n'
+            '  value: string;\n'
+            '  detail: string;\n'
+            '};\n'
+        )
+
+    def _graph_data_template(self) -> str:
+        return (
+            'import type { Edge, Node } from "reactflow";\n'
+            'import type { GraphNodeData, GraphNodeKind, GraphSummaryItem } from "./types";\n\n'
+            'export const graphToneByKind: Record<GraphNodeKind, { background: string; color: string; border: string }> = {\n'
+            '  source: { background: "#fff7ed", color: "#7c2d12", border: "1px solid rgba(194, 120, 3, 0.28)" },\n'
+            '  pipeline: { background: "#fffaf5", color: "#2f241c", border: "1px solid rgba(139, 94, 60, 0.24)" },\n'
+            '  destination: { background: "#ecfccb", color: "#365314", border: "1px solid rgba(101, 163, 13, 0.26)" },\n'
+            '};\n\n'
+            'export const graphSummaryItems: GraphSummaryItem[] = [\n'
+            '  { label: "Sample metric", value: "Example value", detail: "Use this area for clearly labeled sample content or real data." },\n'
+            '  { label: "Example trend", value: "Sample status", detail: "Avoid authoritative-looking operational numbers until the surface is wired to live data." },\n'
+            '];\n\n'
+            'export const graphNodes: Node<GraphNodeData>[] = [\n'
+            '  { id: "source", position: { x: 40, y: 140 }, data: { label: "Source", summary: "Incoming signals or repository events.", kind: "source" }, style: { width: 170 } },\n'
+            '  { id: "pipeline", position: { x: 320, y: 120 }, data: { label: "Pipeline", summary: "Validation, orchestration, and review flow.", kind: "pipeline" }, style: { width: 190 } },\n'
+            '  { id: "destination", position: { x: 640, y: 140 }, data: { label: "Destination", summary: "Published UI or downstream delivery target.", kind: "destination" }, style: { width: 180 } },\n'
+            '];\n\n'
+            'export const graphEdges: Edge[] = [\n'
+            '  { id: "source-pipeline", source: "source", target: "pipeline", label: "validated", style: { stroke: "#8b5e3c", strokeWidth: 1.8 } },\n'
+            '  { id: "pipeline-destination", source: "pipeline", target: "destination", label: "delivers", style: { stroke: "#4d7c0f", strokeWidth: 1.8 } },\n'
+            '];\n'
+        )
+
+    def _graph_support_operations(self, graph_component_files: dict[str, str], reactflow_component_file: str) -> dict[str, str]:
+        if not graph_component_files:
+            return {}
+        return {
+            graph_component_files["empty"]: self._graph_empty_state_template(),
+            graph_component_files["legend"]: self._graph_legend_template(),
+            graph_component_files["summary"]: self._graph_summary_template(),
+            graph_component_files["workspace"]: self._graph_workspace_wrapper_template(
+                graph_component_files,
+                reactflow_component_file,
+            ),
+        }
+
+    def _graph_empty_state_template(self) -> str:
+        return (
+            'export function GraphEmptyState() {\n'
+            '  return (\n'
+            '    <div style={{ borderRadius: "22px", padding: "1.25rem", background: "#f1e4d4", color: "#6b5a4a" }}>\n'
+            '      This graph surface is ready, but it has no live content yet. Connect a data source to replace the sample workspace.\n'
+            '    </div>\n'
+            '  );\n'
+            '}\n'
+        )
+
+    def _graph_legend_template(self) -> str:
+        return (
+            'import { graphToneByKind } from "./graph-data";\n\n'
+            'export function GraphLegend() {\n'
+            '  return (\n'
+            '    <div style={{ display: "grid", gap: "0.75rem", gridTemplateColumns: "repeat(auto-fit, minmax(12rem, 1fr))" }}>\n'
+            '      {Object.entries(graphToneByKind).map(([key, tone]) => (\n'
+            '        <div key={key} style={{ borderRadius: "18px", padding: "0.9rem", ...tone }}>\n'
+            '          <strong style={{ textTransform: "capitalize" }}>{key}</strong>\n'
+            '        </div>\n'
+            '      ))}\n'
+            '    </div>\n'
+            '  );\n'
+            '}\n'
+        )
+
+    def _graph_summary_template(self) -> str:
+        return (
+            'import { graphSummaryItems } from "./graph-data";\n\n'
+            'export function GraphSummary() {\n'
+            '  return (\n'
+            '    <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(auto-fit, minmax(12rem, 1fr))" }}>\n'
+            '      {graphSummaryItems.map((item) => (\n'
+            '        <article key={item.label} style={{ borderRadius: "20px", padding: "1rem", background: "#f1e4d4" }}>\n'
+            '          <p style={{ margin: 0, textTransform: "uppercase", letterSpacing: "0.14em", fontSize: "0.72rem", color: "#b45309" }}>{item.label}</p>\n'
+            '          <p style={{ margin: "0.4rem 0 0", fontSize: "1.15rem", color: "#2f241c", fontWeight: 700 }}>{item.value}</p>\n'
+            '          <p style={{ margin: "0.5rem 0 0", color: "#6b5a4a" }}>{item.detail}</p>\n'
+            '        </article>\n'
+            '      ))}\n'
+            '    </div>\n'
+            '  );\n'
+            '}\n'
+        )
+
+    def _graph_workspace_wrapper_template(self, graph_component_files: dict[str, str], reactflow_component_file: str) -> str:
+        wrapper_file = graph_component_files["workspace"]
+        import_workspace = self._relative_import(wrapper_file, reactflow_component_file)
+        import_legend = self._relative_import(wrapper_file, graph_component_files["legend"])
+        import_summary = self._relative_import(wrapper_file, graph_component_files["summary"])
+        import_empty = self._relative_import(wrapper_file, graph_component_files["empty"])
+        workspace_component_name = self._to_component_name(Path(reactflow_component_file).stem)
+        return (
+            f'import {{ {workspace_component_name} }} from "{import_workspace}";\n'
+            f'import {{ GraphLegend }} from "{import_legend}";\n'
+            f'import {{ GraphSummary }} from "{import_summary}";\n'
+            f'import {{ GraphEmptyState }} from "{import_empty}";\n\n'
+            'type GraphWorkspaceProps = {\n'
+            '  hasContent?: boolean;\n'
+            '};\n\n'
+            'export function GraphWorkspace({ hasContent = true }: GraphWorkspaceProps) {\n'
+            '  if (!hasContent) {\n'
+            '    return <GraphEmptyState />;\n'
+            '  }\n\n'
+            '  return (\n'
+            '    <div style={{ display: "grid", gap: "1rem" }}>\n'
+            '      <GraphSummary />\n'
+            '      <GraphLegend />\n'
+            f'      <{workspace_component_name} />\n'
+            '    </div>\n'
+            '  );\n'
+            '}\n'
+        )
+
+    def _next_graph_home_preview_template(self, route_slug: str, issue: str, design_brief: dict[str, Any] | None = None) -> str:
+        design = self._next_design_direction(issue, route_slug or "graph", design_brief)
+        destination = f"/{route_slug}" if route_slug else "/"
+        return (
+            'import Link from "next/link";\n\n'
+            'const homeStyles = {\n'
+            f'  shell: {{ minHeight: "100vh", padding: "4rem 1.5rem", background: "{design["background"]}", color: "{design["text"]}" }},\n'
+            f'  panel: {{ maxWidth: "56rem", margin: "0 auto", padding: "2rem", borderRadius: "28px", background: "{design["panel"]}", boxShadow: "0 24px 60px rgba(15, 23, 42, 0.12)" }},\n'
+            f'  eyebrow: {{ margin: 0, textTransform: "uppercase", letterSpacing: "0.18em", fontSize: "0.72rem", color: "{design["accent"]}" }},\n'
+            '  title: { margin: "0.75rem 0 0", fontSize: "clamp(2.4rem, 6vw, 4.5rem)", lineHeight: 0.95 },\n'
+            f'  description: {{ maxWidth: "42rem", margin: "1rem 0 0", fontSize: "1.05rem", color: "{design["muted"]}" }},\n'
+            '  link: { display: "inline-flex", marginTop: "1.5rem", padding: "0.85rem 1.15rem", borderRadius: "999px", textDecoration: "none", background: "#2f241c", color: "#fffaf5", fontWeight: 600 },\n'
+            '};\n\n'
+            'export default function HomePage() {\n'
+            '  return (\n'
+            '    <main style={homeStyles.shell}>\n'
+            '      <section style={homeStyles.panel}>\n'
+            '        <p style={homeStyles.eyebrow}>Graph preview</p>\n'
+            '        <h1 style={homeStyles.title}>SmartFarm operations, mapped.</h1>\n'
+            '        <p style={homeStyles.description}>Open the graph experience to inspect the relationship map, supporting summaries, and state-aware UI that now live in the dedicated route.</p>\n'
+            f'        <Link href="{destination}" style={{homeStyles.link}}>Open graph experience</Link>\n'
+            '      </section>\n'
+            '    </main>\n'
+            '  );\n'
+            '}\n'
+        )
 
     def _next_api_route_template(self, nextjs_profile: dict[str, Any], route_slug: str) -> str:
         route_name = route_slug or "status"

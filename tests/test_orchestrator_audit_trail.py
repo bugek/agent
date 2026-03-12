@@ -7,6 +7,65 @@ from ai_code_agent import orchestrator
 
 
 class OrchestratorAuditTrailTest(unittest.TestCase):
+    def test_scope_node_records_scope_details(self) -> None:
+        scope_result = {
+            "scope_context": {
+                "status": "ready",
+                "in_scope": ["app/graph/page.tsx"],
+                "out_of_scope": ["app/layout.tsx", "app/page.tsx"],
+                "ambiguities": [],
+            },
+            "file_edit_policy": {"allow": [], "deny": [".git/**"]},
+        }
+
+        with patch("ai_code_agent.agents.planner.ScopeAgent") as mock_scope, patch(
+            "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
+        ):
+            mock_scope.return_value.run.return_value = scope_result
+            result = orchestrator.scope_node(
+                {
+                    "issue_description": "update app",
+                    "workspace_dir": ".",
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                }
+            )
+
+        event = result["execution_events"][-1]
+        self.assertEqual(event["node"], "scope")
+        self.assertEqual(event["details"]["in_scope_count"], 1)
+        self.assertEqual(event["details"]["out_of_scope_count"], 2)
+
+    def test_analysis_node_records_retrieval_details(self) -> None:
+        analysis_result = {
+            "workspace_profile": {"frameworks": ["nextjs"]},
+            "analysis_context": {
+                "retrieval_strategy": "hybrid",
+                "candidate_files": ["app/graph/page.tsx", "components/graph/canvas.tsx"],
+                "selected_skills": [{"name": "release-readiness"}],
+                "blocked_skills": [{"name": "compose-stack", "permission": "sandbox"}],
+                "graph_seed_files": ["app/graph/page.tsx"],
+            },
+        }
+
+        with patch("ai_code_agent.agents.planner.AnalysisAgent") as mock_analysis, patch(
+            "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
+        ):
+            mock_analysis.return_value.run.return_value = analysis_result
+            result = orchestrator.analysis_node(
+                {
+                    "issue_description": "update app",
+                    "workspace_dir": ".",
+                    "run_id": "run-123",
+                    "workflow_started_at": "2026-03-08T10:22:33Z",
+                }
+            )
+
+        event = result["execution_events"][-1]
+        self.assertEqual(event["node"], "analysis")
+        self.assertEqual(event["details"]["candidate_file_count"], 2)
+        self.assertEqual(event["details"]["selected_skill_count"], 1)
+
     def test_plan_node_records_retrieval_and_policy_details(self) -> None:
         planner_result = {
             "plan": "Inspect allowed files.",
@@ -21,10 +80,12 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
                 ],
                 "blocked_files_to_edit": [{"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule"}],
                 "graph_seed_files": ["ai_code_agent/main.py", "ai_code_agent/orchestrator.py"],
+                "scope": {"in_scope": ["ai_code_agent/main.py"], "out_of_scope": ["artifact/"]},
+                "tasks": [{"id": "T1", "title": "Update main"}],
             },
         }
 
-        with patch("ai_code_agent.agents.planner.PlannerAgent") as mock_planner, patch(
+        with patch("ai_code_agent.agents.planner.PlanAgent") as mock_planner, patch(
             "ai_code_agent.llm.client.LLMClient.from_config", return_value=object()
         ):
             mock_planner.return_value.run.return_value = planner_result
@@ -55,6 +116,9 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["skill_invocations"][1], {"name": "compose-stack", "phase": "plan", "outcome": "blocked"})
         self.assertEqual(event["details"]["blocked_files_to_edit"], 1)
         self.assertEqual(event["details"]["graph_seed_files"], 2)
+        self.assertEqual(event["details"]["task_count"], 1)
+        self.assertEqual(event["details"]["scope_in_count"], 1)
+        self.assertEqual(event["details"]["scope_out_count"], 1)
         self.assertEqual(event["details"]["edit_intent_count"], 0)
         self.assertEqual(result["execution_metrics"]["planning"]["blocked_file_count"], 1)
 
@@ -301,6 +365,7 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
                 object(),
             )
             mock_git_ops.return_value.create_branch.return_value = True
+            mock_git_ops.return_value.remote_url.return_value = "https://github.com/octo/repo.git"
             mock_git_ops.return_value.commit_changes.return_value = True
             mock_git_ops.return_value.push_branch.return_value = True
             mock_create_remote_pr.return_value = {
@@ -309,6 +374,7 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
                 "provider": "github",
                 "branch_name": "ai-code-agent/gh-42-fix-flaky-validation",
                 "base_branch": "main",
+                "remote_url": "https://github.com/octo/repo.git",
                 "pr_url": "https://github.com/octo/repo/pull/9",
                 "message": "Committed, pushed, and opened GitHub PR: https://github.com/octo/repo/pull/9",
                 "error": None,
@@ -332,6 +398,7 @@ class OrchestratorAuditTrailTest(unittest.TestCase):
         self.assertEqual(event["details"]["outcome"], "created")
         self.assertEqual(event["details"]["reason"], "opened_github_pr")
         self.assertEqual(event["details"]["issue_provider"], "github")
+        self.assertEqual(event["details"]["remote_url"], "https://github.com/octo/repo.git")
         self.assertIn("ai-code-agent/gh-42-fix-flaky-validation", event["details"]["branch_name"])
 
     def test_create_pr_node_skips_git_automation_for_non_git_workspace(self) -> None:

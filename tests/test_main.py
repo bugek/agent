@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from ai_code_agent.config import AgentConfig
-from ai_code_agent.main import parse_args, run_diagnostics, run_health_check, run_monitor_services, run_normalize_metrics
+from ai_code_agent.main import cli, parse_args, run_diagnostics, run_health_check, run_monitor_services, run_normalize_metrics
 from ai_code_agent.metrics import build_diagnostics_summary, persist_diagnostics_summary, persist_execution_metrics
 
 
@@ -75,6 +75,33 @@ class MainCliTest(unittest.TestCase):
         self.assertEqual(args.frontend_port, 5100)
         self.assertTrue(args.detach)
 
+    def test_run_command_json_output_normalizes_sets(self) -> None:
+        class StubGraph:
+            def invoke(self, initial_state):
+                return {
+                    "run_id": initial_state["run_id"],
+                    "review_approved": True,
+                    "test_passed": True,
+                    "labels": {"alpha", "beta"},
+                }
+
+        with patch("sys.argv", ["ai-code-agent", "run", "--issue", "demo", "--repo", ".", "--json"]), patch(
+            "ai_code_agent.main.resolve_issue_input",
+            return_value={"description": "demo issue", "context": {}},
+        ), patch("ai_code_agent.main.build_graph", return_value=StubGraph()), patch(
+            "ai_code_agent.llm.client.LLMClient.from_config"
+        ) as mock_llm:
+            mock_llm.return_value.enabled = True
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                exit_code = cli()
+
+        output = stream.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"labels": [', output)
+        self.assertIn('"alpha"', output)
+        self.assertIn('"beta"', output)
+
     def test_run_diagnostics_prints_latest_metrics_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             metrics = {
@@ -87,6 +114,8 @@ class MainCliTest(unittest.TestCase):
                     "total_duration_ms": 1100,
                     "validation_strategy": "targeted_retry",
                     "requested_retry_labels": ["script:build"],
+                    "blocker_type_retry_used": True,
+                    "blocker_type_retry_labels": ["script:build"],
                     "skipped_command_count": 2,
                     "command_reduction_rate": 0.67,
                     "slowest_command": {"label": "script:build", "duration_ms": 980, "exit_code": 1, "timed_out": False},
@@ -112,6 +141,8 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Remediation applied: True", rendered)
             self.assertIn("Failed commands: script:build", rendered)
             self.assertIn("Requested retry labels: script:build", rendered)
+            self.assertIn("Blocker-type retry used: True", rendered)
+            self.assertIn("Blocker-type retry labels: script:build", rendered)
             self.assertIn("Skipped commands on this pass: 2", rendered)
             self.assertIn("Command reduction rate: 0.67", rendered)
             self.assertIn("Slowest command: script:build (980 ms)", rendered)
@@ -227,11 +258,14 @@ class MainCliTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(popen_mock.call_count, 2)
+        backend_env = popen_mock.call_args_list[0].kwargs["env"]
         rendered = output.getvalue()
         self.assertIn("Monitor backend API: http://127.0.0.1:8000/api/monitor", rendered)
         self.assertIn("Monitor frontend UI: http://127.0.0.1:4173/?repo=demo-workspace&recent=7", rendered)
         self.assertIn("Backend PID: 101", rendered)
         self.assertIn("Frontend PID: 202", rendered)
+        self.assertEqual(backend_env["MONITOR_FRONTEND_URL"], "http://127.0.0.1:4173")
+        self.assertEqual(backend_env["MONITOR_FRONTEND_ORIGINS"], "http://127.0.0.1:4173")
 
     def test_run_diagnostics_prints_recent_run_trend(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -282,6 +316,8 @@ class MainCliTest(unittest.TestCase):
                     "failed_commands": ["script:test"],
                     "total_duration_ms": 200,
                     "validation_strategy": "targeted_retry",
+                    "blocker_type_retry_used": True,
+                    "blocker_type_retry_labels": ["script:typecheck", "script:visual-review"],
                     "skipped_command_count": 3,
                     "command_reduction_rate": 0.6,
                     "slowest_command": {"label": "script:test", "duration_ms": 150},
@@ -327,6 +363,7 @@ class MainCliTest(unittest.TestCase):
             self.assertIn("Failure breakdown: validation(runs=1; commands=script:test=1; nodes=test=1)", rendered)
             self.assertIn("Failure subcategory breakdown: command:script:test(runs=1; categories=validation=1)", rendered)
             self.assertIn("Dashboard summary: latest_failure=validation/command:script:test, dominant_failure=validation/command:script:test, retry_stop_rate=0.00, sandbox_fallback_rate=0.00", rendered)
+            self.assertIn("Blocker-type retry breakdown: script:visual-review(runs=1, recovered=0, rate=0.00); script:typecheck(runs=1, recovered=0, rate=0.00)", rendered)
             self.assertIn("Top terminal nodes: review=2, test=1", rendered)
             self.assertIn("Top failing commands: script:test=1", rendered)
             self.assertIn("Top slowest commands: script:test avg=150 max=150 count=1, script:lint avg=60 max=60 count=1, compileall avg=36 max=50 count=3", rendered)
@@ -396,6 +433,8 @@ class MainCliTest(unittest.TestCase):
                     "failed_commands": ["script:test"],
                     "total_duration_ms": 200,
                     "validation_strategy": "targeted_retry",
+                    "blocker_type_retry_used": True,
+                    "blocker_type_retry_labels": ["script:typecheck", "script:visual-review"],
                     "skipped_command_count": 3,
                     "command_reduction_rate": 0.6,
                     "slowest_command": {"label": "script:test", "duration_ms": 150},
@@ -436,6 +475,8 @@ class MainCliTest(unittest.TestCase):
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry"]["average_command_reduction_rate"], 0.6)
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry_vs_full"]["success_rate_delta"], -1.0)
             self.assertEqual(payload["trend"]["strategy_comparison"]["targeted_retry_vs_full"]["testing_duration_ms_delta"], 140)
+            self.assertEqual(payload["trend"]["blocker_type_retry_breakdown"][0], {"label": "script:visual-review", "run_count": 1, "recovered_count": 0, "recovery_rate": 0.0})
+            self.assertEqual(payload["trend"]["blocker_type_retry_breakdown"][1], {"label": "script:typecheck", "run_count": 1, "recovered_count": 0, "recovery_rate": 0.0})
             self.assertEqual(payload["trend"]["primary_failure_subcategories"], {"command:script:test": 1})
             self.assertEqual(payload["trend"]["failure_category_breakdown"]["validation"]["run_count"], 1)
             self.assertEqual(payload["trend"]["failure_subcategory_breakdown"]["command:script:test"]["primary_categories"][0], {"category": "validation", "count": 1})
@@ -475,6 +516,8 @@ class MainCliTest(unittest.TestCase):
                     "failed_commands": [],
                     "total_duration_ms": 50,
                     "validation_strategy": "targeted_retry",
+                    "blocker_type_retry_used": True,
+                    "blocker_type_retry_labels": ["script:typecheck"],
                     "skipped_command_count": 2,
                     "command_reduction_rate": 0.5,
                     "slowest_command": None,
@@ -492,8 +535,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
-            self.assertIn("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath", rendered)
-            self.assertIn("run-rows\tapproved\t\t\ttargeted_retry\texisting\texisting_open_pr\tTrue\t2\t0.5\t150\t50\treview\t.ai-code-agent/runs/run-rows/metrics.json", rendered)
+            self.assertIn("run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tblocker_type_retry_used\tblocker_type_retry_labels\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath", rendered)
+            self.assertIn("run-rows\tapproved\t\t\ttargeted_retry\tTrue\tscript:typecheck\texisting\texisting_open_pr\tTrue\t2\t0.5\t150\t50\treview\t.ai-code-agent/runs/run-rows/metrics.json", rendered)
 
     def test_run_diagnostics_summary_uses_none_failure_for_latest_approved_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -755,8 +798,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\t\tfull\tfailed\tpush_failed\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tblocker_type_retry_used\tblocker_type_retry_labels\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\t\tfull\tFalse\t\tfailed\tpush_failed\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_supports_ndjson_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -831,8 +874,8 @@ class MainCliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue().splitlines()
-            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
-            self.assertIn("run-1\tfailed\tvalidation\tcommand:compileall\tfull\tfailed\tpush_failed\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
+            self.assertEqual(rendered[0], "run_id\tstatus\tprimary_failure\tfailure_subcategory\tvalidation_strategy\tblocker_type_retry_used\tblocker_type_retry_labels\tcreate_pr_outcome\tcreate_pr_reason\tretry_recovered\tskipped_command_count\tcommand_reduction_rate\tduration_ms\ttesting_duration_ms\tterminal_node\tpath")
+            self.assertIn("run-1\tfailed\tvalidation\tcommand:compileall\tfull\tFalse\t\tfailed\tpush_failed\tFalse\t0\t0.0\t100\t70\ttest\t.ai-code-agent/runs/run-1/metrics.json", rendered[1])
 
     def test_run_diagnostics_reuses_fresh_summary_snapshot_for_json_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

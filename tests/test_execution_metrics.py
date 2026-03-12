@@ -38,6 +38,10 @@ class ExecutionMetricsTest(unittest.TestCase):
                     ],
                     "blocked_files_to_edit": [{"file_path": "artifact/fixtures/demo.txt", "reason": "matched deny rule"}],
                     "edit_intent": [{"file_path": "app/page.tsx", "intent": "Fix dashboard render regression."}],
+                    "tasks": [
+                        {"id": "T1", "title": "Panel copy", "status": "completed", "target_files": ["components/panel.tsx"], "acceptance_checks": ["compileall"]},
+                        {"id": "T2", "title": "Dashboard page", "status": "pending", "goal": "Repair the failing build before approval.", "target_files": ["app/page.tsx"], "acceptance_checks": ["script:build"]},
+                    ],
                 },
                 "codegen_summary": {
                     "generated_by": "llm",
@@ -69,6 +73,8 @@ class ExecutionMetricsTest(unittest.TestCase):
                     "selected_command_labels": ["script:build"],
                     "skipped_command_labels": ["compileall"],
                     "requested_retry_labels": ["script:build"],
+                    "blocker_type_retry_used": True,
+                    "blocker_type_retry_labels": ["script:build"],
                     "sandbox_requested_mode": "auto",
                     "sandbox_mode": "local",
                     "sandbox_started": True,
@@ -103,8 +109,20 @@ class ExecutionMetricsTest(unittest.TestCase):
                         "failed_validation_labels": ["script:build"],
                         "focus_areas": ["app/page.tsx"],
                         "guidance": ["Repair the failing build before approval."],
+                        "task_remediation": [
+                            {
+                                "task_id": "T2",
+                                "title": "Dashboard page",
+                                "blocker_types": ["build_breakage"],
+                                "failed_validation_labels": ["script:build"],
+                                "focus_areas": ["app/page.tsx"],
+                                "guidance": ["Repair the failing build before approval."],
+                            }
+                        ],
                     },
                 },
+                "failed_task_ids": ["T2"],
+                "task_statuses": {"T1": "completed", "T2": "failed"},
                 "retry_count": 1,
                 "execution_events": [
                     {"timestamp": "2026-03-08T10:22:33Z", "node": "plan", "event_type": "node_started", "attempt": 1, "status": "started", "duration_ms": 0},
@@ -126,6 +144,9 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["planning"]["available_skill_count"], 2)
         self.assertEqual(metrics["planning"]["selected_skill_count"], 1)
         self.assertEqual(metrics["planning"]["selected_skills"], ["frontend-visual-review"])
+        self.assertEqual(metrics["planning"]["tasks"][0]["id"], "T1")
+        self.assertEqual(metrics["planning"]["tasks"][1]["status"], "failed")
+        self.assertEqual(metrics["planning"]["task_failed_ids"], ["T2"])
         self.assertEqual(metrics["planning"]["selected_skill_details"][0]["name"], "frontend-visual-review")
         self.assertEqual(metrics["planning"]["blocked_skill_count"], 1)
         self.assertEqual(metrics["planning"]["blocked_skills"], ["compose-stack"])
@@ -151,6 +172,8 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["selected_command_count"], 1)
         self.assertEqual(metrics["testing"]["skipped_command_count"], 1)
         self.assertEqual(metrics["testing"]["requested_retry_labels"], ["script:build"])
+        self.assertEqual(metrics["testing"]["blocker_type_retry_used"], True)
+        self.assertEqual(metrics["testing"]["blocker_type_retry_labels"], ["script:build"])
         self.assertEqual(metrics["testing"]["sandbox_requested_mode"], "auto")
         self.assertEqual(metrics["testing"]["sandbox_mode"], "local")
         self.assertEqual(metrics["testing"]["sandbox_started"], True)
@@ -168,13 +191,17 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(metrics["testing"]["visual_review"]["missing_state_count"], 2)
         self.assertEqual(metrics["review"]["validation_failed_count"], 1)
         self.assertEqual(metrics["review"]["remediation_required"], True)
+        self.assertEqual(metrics["review"]["failed_task_ids"], ["T2"])
         self.assertEqual(metrics["review"]["remediation"]["focus_areas"], ["app/page.tsx"])
         self.assertEqual(metrics["review"]["remediation"]["guidance"], ["Repair the failing build before approval."])
+        self.assertEqual(metrics["review"]["remediation"]["task_remediation"][0]["task_id"], "T2")
+        self.assertEqual(metrics["review"]["remediation"]["task_remediation"][0]["blocker_types"], ["build_breakage"])
         self.assertEqual(metrics["effectiveness"]["retry_attempted"], True)
         self.assertEqual(metrics["effectiveness"]["retry_recovered"], False)
         self.assertEqual(metrics["effectiveness"]["remediation_applied"], True)
         self.assertEqual(metrics["effectiveness"]["edit_intent_used"], True)
         self.assertEqual(metrics["effectiveness"]["targeted_retry_used"], True)
+        self.assertEqual(metrics["effectiveness"]["blocker_type_retry_used"], True)
         self.assertEqual(metrics["effectiveness"]["command_reduction_count"], 1)
         self.assertEqual(metrics["effectiveness"]["command_reduction_rate"], 0.5)
         self.assertEqual(metrics["failures"]["primary_category"], "policy")
@@ -343,6 +370,7 @@ class ExecutionMetricsTest(unittest.TestCase):
         self.assertEqual(trend["primary_failure_subcategories"], {})
         self.assertEqual(trend["dashboard"]["latest_failure_category"], None)
         self.assertEqual(trend["dashboard"]["latest_failure_subcategory"], None)
+        self.assertEqual(trend["blocker_type_retry_breakdown"], [])
 
 
 if __name__ == "__main__":
